@@ -3,7 +3,7 @@ import json
 from flask import Flask, request, Response, render_template_string
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB, puoi aumentare se serve
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 16 MB, puoi aumentare se serve
 
 # --- HTML, CSS, JS for the Web Interface ---
 HTML_TEMPLATE = """
@@ -246,32 +246,32 @@ def test_proxies_stream():
             elif line.startswith(('http://', 'https://')):
                 result = test_single_proxy(line, 'http', line)
             else:
-                # Prova prima come SOCKS5
-                result_socks = test_single_proxy(line, 'socks5', line)
-                if result_socks['status'] == 'SUCCESS':
-                    result = result_socks
+                # Prova prima come HTTP
+                result_http = test_single_proxy(line, 'http', line)
+                if result_http['status'] == 'SUCCESS':
+                    result = result_http
                 else:
-                    # Se fallisce, prova come HTTP
-                    result_http = test_single_proxy(line, 'http', line)
-                    if result_http['status'] == 'SUCCESS':
-                        result = result_http
-                    else:
-                        # Se entrambi falliscono, mostra il risultato SOCKS5 (più informativo)
+                    # Se fallisce, prova come SOCKS5
+                    result_socks = test_single_proxy(line, 'socks5', line)
+                    if result_socks['status'] == 'SUCCESS':
                         result = result_socks
+                    else:
+                        # Se entrambi falliscono, mostra il risultato HTTP (più informativo)
+                        result = result_http
 
-            data_to_send = result.copy();
-            data_to_send['proxy'] = line;
+            data_to_send = result.copy()
+            data_to_send['proxy'] = line
             if result['status'] == 'SUCCESS':
-                protocol_used = result.get('protocol_used', 'sconosciuto');
-                proxy_to_save = line;
-                if protocol_used == 'http' and not line.startswith(('http://', 'https://')):
-                    proxy_to_save = f"http://{line}";
-                elif protocol_used == 'socks5' and not line.startswith(('socks5://', 'socks5h://')):
-                    proxy_to_save = f"socks5://{line}";
-                data_to_send['proxy_to_save'] = proxy_to_save;
+                protocol_used = result.get('protocol_used', 'sconosciuto')
+                proxy_to_save = line
+                if protocol_used == 'http' and not line.startsWith(('http://', 'https://')):
+                    proxy_to_save = f"http://{line}"
+                elif protocol_used == 'socks5' and not line.startsWith(('socks5://', 'socks5h://')):
+                    proxy_to_save = f"socks5://{line}"
+                data_to_send['proxy_to_save'] = proxy_to_save
 
-            print("Risultato per", line, ":", data_to_send);
-            yield f"data: {json.dumps(data_to_send)}\n\n";
+            print("Risultato per", line, ":", data_to_send)
+            yield f"data: {json.dumps(data_to_send)}\n\n"
     
     return Response(generate_results(), mimetype='text/event-stream')
 
