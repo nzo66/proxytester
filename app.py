@@ -3,6 +3,7 @@ import json
 from flask import Flask, request, Response, render_template_string
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB, puoi aumentare se serve
 
 # --- HTML, CSS, JS for the Web Interface ---
 HTML_TEMPLATE = """
