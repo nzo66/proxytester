@@ -276,6 +276,6 @@ def test_proxies_stream():
 
 if __name__ == '__main__':
     print("Avvio del server Proxy Tester Web...")
-    print("Apri http://127.0.0.1:7861 nel tuo browser.")
-    app.run(host='0.0.0.0', port=7860, debug=True)
+    print("Apri http://127.0.0.1:7860 nel tuo browser.")
+    app.run(host='0.0.0.0', port=7860, debug=False)
 
