@@ -264,9 +264,9 @@ def test_proxies_stream():
             if result['status'] == 'SUCCESS':
                 protocol_used = result.get('protocol_used', 'sconosciuto')
                 proxy_to_save = line
-                if protocol_used == 'http' and not line.startsWith(('http://', 'https://')):
+                if protocol_used == 'http' and not line.startswith(('http://', 'https://')):
                     proxy_to_save = f"http://{line}"
-                elif protocol_used == 'socks5' and not line.startsWith(('socks5://', 'socks5h://')):
+                elif protocol_used == 'socks5' and not line.startswith(('socks5://', 'socks5h://')):
                     proxy_to_save = f"socks5://{line}"
                 data_to_send['proxy_to_save'] = proxy_to_save
 
