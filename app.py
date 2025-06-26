@@ -130,7 +130,7 @@ HTML_TEMPLATE = """
 
         // Heartbeat per verificare la connessione
         function startHeartbeat() {
-            heartbeatInterval = setInterval(() => {
+            heartbeatInterval = setInterval(function() {
                 if (document.getElementById('start-test-btn').disabled && !isPageUnloading) {
                     fetch('/heartbeat', {
                         method: 'POST',
@@ -139,7 +139,7 @@ HTML_TEMPLATE = """
                             'X-Session-ID': sessionId
                         },
                         body: JSON.stringify({session_id: sessionId})
-                    }).catch(error => {
+                    }).catch(function(error) {
                         console.log('Heartbeat failed:', error);
                     });
                 }
@@ -160,9 +160,14 @@ HTML_TEMPLATE = """
         }
 
         function startTest() {
+            console.log('Avvio test parallelo...');
+            
             const proxyList = document.getElementById('proxy-list').value;
-            const proxies = proxyList.split('\\n').map(p => p.trim()).filter(p => p);
+            const proxies = proxyList.split('\\n').map(function(p) { return p.trim(); }).filter(function(p) { return p; });
             const maxWorkers = parseInt(document.getElementById('max-workers').value) || 20;
+            
+            console.log('Proxy trovati:', proxies.length);
+            console.log('Max workers:', maxWorkers);
             
             if (proxies.length === 0) {
                 alert('Per favore, inserisci almeno un proxy.');
@@ -198,71 +203,105 @@ HTML_TEMPLATE = """
             let workingCount = 0;
             let failedCount = 0;
 
-            statusBar.innerText = `Test parallelo avviato con ${maxWorkers} thread... 0 / ${proxies.length} completati`;
+            statusBar.innerText = 'Test parallelo avviato con ' + maxWorkers + ' thread... 0 / ' + proxies.length + ' completati';
 
             if (abortController) abortController.abort();
             abortController = new AbortController();
 
+            // Crea FormData correttamente
+            const formData = new FormData();
+            formData.append('proxies', proxyList);
+            formData.append('max_workers', maxWorkers.toString());
+
+            console.log('Invio richiesta al server...');
+
             fetch('/test', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
                     'X-Session-ID': sessionId
                 },
-                body: 'proxies=' + encodeURIComponent(proxyList) + '&max_workers=' + maxWorkers,
+                body: formData,
                 signal: abortController.signal
-            }).then(response => {
+            }).then(function(response) {
+                console.log('Risposta ricevuta:', response.status);
+                
+                if (!response.ok) {
+                    throw new Error('Errore HTTP: ' + response.status);
+                }
+                
                 const reader = response.body.getReader();
                 let buffer = '';
+                
                 function read() {
-                    reader.read().then(({done, value}) => {
+                    reader.read().then(function(result) {
+                        const done = result.done;
+                        const value = result.value;
+                        
                         if (done) {
+                            console.log('Stream completato');
                             testButton.disabled = false;
                             testButton.innerText = '🚀 Avvia Test Parallelo';
                             document.getElementById('stop-test-btn').disabled = true;
                             document.getElementById('max-workers').disabled = false;
-                            statusBar.innerText = `✅ Test completato: ${completedCount} / ${proxies.length} (${workingCount} funzionanti, ${failedCount} falliti)`;
+                            statusBar.innerText = '✅ Test completato: ' + completedCount + ' / ' + proxies.length + ' (' + workingCount + ' funzionanti, ' + failedCount + ' falliti)';
                             updateProgress(proxies.length, proxies.length);
                             stopHeartbeat();
                             localStorage.removeItem('activeTest');
                             return;
                         }
+                        
                         buffer += new TextDecoder().decode(value, {stream:true});
                         let parts = buffer.split('\\n\\n');
                         buffer = parts.pop();
-                        for (let part of parts) {
+                        
+                        for (let i = 0; i < parts.length; i++) {
+                            const part = parts[i];
                             if (part.startsWith('data: ')) {
-                                const data = JSON.parse(part.slice(6));
-                                completedCount++;
-                                updateProgress(completedCount, proxies.length);
-                                statusBar.innerText = `⚡ Test parallelo: ${completedCount} / ${proxies.length} completati (${workingCount} ✅, ${failedCount} ❌)`;
-                                
-                                if (data.status === 'SUCCESS') {
-                                    workingCount++;
-                                    const list = document.getElementById('working-list');
-                                    const item = document.createElement('li');
-                                    item.innerHTML = \`<span class="success">\${data.proxy_to_save}</span> <span class="protocol">\${data.protocol_used}</span>\`;
-                                    list.appendChild(item);
-                                    document.getElementById('working-count').innerText = workingCount;
-                                    document.getElementById('download-btn').disabled = false;
-                                } else if (data.status === 'FAIL') {
-                                    failedCount++;
-                                    const list = document.getElementById('failed-list');
-                                    const item = document.createElement('li');
-                                    item.innerHTML = \`<span class="failure">\${data.proxy}</span> - \${data.details}\`;
-                                    list.appendChild(item);
-                                    document.getElementById('failed-count').innerText = failedCount;
+                                try {
+                                    const data = JSON.parse(part.slice(6));
+                                    console.log('Risultato ricevuto:', data);
+                                    
+                                    completedCount++;
+                                    updateProgress(completedCount, proxies.length);
+                                    statusBar.innerText = '⚡ Test parallelo: ' + completedCount + ' / ' + proxies.length + ' completati (' + workingCount + ' ✅, ' + failedCount + ' ❌)';
+                                    
+                                    if (data.status === 'SUCCESS') {
+                                        workingCount++;
+                                        const list = document.getElementById('working-list');
+                                        const item = document.createElement('li');
+                                        item.innerHTML = '<span class="success">' + data.proxy_to_save + '</span> <span class="protocol">' + data.protocol_used + '</span>';
+                                        list.appendChild(item);
+                                        document.getElementById('working-count').innerText = workingCount;
+                                        document.getElementById('download-btn').disabled = false;
+                                    } else if (data.status === 'FAIL') {
+                                        failedCount++;
+                                        const list = document.getElementById('failed-list');
+                                        const item = document.createElement('li');
+                                        item.innerHTML = '<span class="failure">' + data.proxy + '</span> - ' + data.details;
+                                        list.appendChild(item);
+                                        document.getElementById('failed-count').innerText = failedCount;
+                                    }
+                                } catch (e) {
+                                    console.error('Errore parsing JSON:', e, 'Data:', part.slice(6));
                                 }
                             }
                         }
                         read();
+                    }).catch(function(error) {
+                        console.error('Errore lettura stream:', error);
+                        testButton.disabled = false;
+                        testButton.innerText = '🚀 Avvia Test Parallelo';
+                        document.getElementById('stop-test-btn').disabled = true;
+                        document.getElementById('max-workers').disabled = false;
+                        statusBar.innerText = '❌ Errore durante la lettura dei risultati';
+                        stopHeartbeat();
                     });
                 }
                 read();
-            }).catch(error => {
+            }).catch(function(error) {
+                console.error('Errore durante il test:', error);
                 if (error.name !== 'AbortError') {
-                    console.error('Errore durante il test:', error);
-                    statusBar.innerText = '❌ Errore durante il test';
+                    statusBar.innerText = '❌ Errore durante il test: ' + error.message;
                 }
                 testButton.disabled = false;
                 testButton.innerText = '🚀 Avvia Test Parallelo';
@@ -314,7 +353,7 @@ HTML_TEMPLATE = """
                 },
                 body: JSON.stringify({session_id: sessionId}),
                 signal: abortController.signal
-            }).then(response => {
+            }).then(function(response) {
                 if (!response.ok) {
                     throw new Error('Sessione non trovata');
                 }
@@ -322,8 +361,8 @@ HTML_TEMPLATE = """
                 const reader = response.body.getReader();
                 let buffer = '';
                 function read() {
-                    reader.read().then(({done, value}) => {
-                        if (done) {
+                    reader.read().then(function(result) {
+                        if (result.done) {
                             document.getElementById('start-test-btn').disabled = false;
                             document.getElementById('start-test-btn').innerText = '🚀 Avvia Test Parallelo';
                             document.getElementById('stop-test-btn').disabled = true;
@@ -333,10 +372,11 @@ HTML_TEMPLATE = """
                             localStorage.removeItem('activeTest');
                             return;
                         }
-                        buffer += new TextDecoder().decode(value, {stream:true});
+                        buffer += new TextDecoder().decode(result.value, {stream:true});
                         let parts = buffer.split('\\n\\n');
                         buffer = parts.pop();
-                        for (let part of parts) {
+                        for (let i = 0; i < parts.length; i++) {
+                            const part = parts[i];
                             if (part.startsWith('data: ')) {
                                 const data = JSON.parse(part.slice(6));
                                 
@@ -348,7 +388,7 @@ HTML_TEMPLATE = """
                                 if (data.status === 'SUCCESS') {
                                     const list = document.getElementById('working-list');
                                     const item = document.createElement('li');
-                                    item.innerHTML = \`<span class="success">\${data.proxy_to_save}</span> <span class="protocol">\${data.protocol_used}</span>\`;
+                                    item.innerHTML = '<span class="success">' + data.proxy_to_save + '</span> <span class="protocol">' + data.protocol_used + '</span>';
                                     list.appendChild(item);
                                     const currentCount = parseInt(document.getElementById('working-count').innerText);
                                     document.getElementById('working-count').innerText = currentCount + 1;
@@ -356,7 +396,7 @@ HTML_TEMPLATE = """
                                 } else if (data.status === 'FAIL') {
                                     const list = document.getElementById('failed-list');
                                     const item = document.createElement('li');
-                                    item.innerHTML = \`<span class="failure">\${data.proxy}</span> - \${data.details}\`;
+                                    item.innerHTML = '<span class="failure">' + data.proxy + '</span> - ' + data.details;
                                     list.appendChild(item);
                                     const currentCount = parseInt(document.getElementById('failed-count').innerText);
                                     document.getElementById('failed-count').innerText = currentCount + 1;
@@ -367,7 +407,7 @@ HTML_TEMPLATE = """
                     });
                 }
                 read();
-            }).catch(error => {
+            }).catch(function(error) {
                 console.error('Errore nel riprendere il test:', error);
                 document.getElementById('start-test-btn').disabled = false;
                 document.getElementById('start-test-btn').innerText = '🚀 Avvia Test Parallelo';
@@ -380,12 +420,12 @@ HTML_TEMPLATE = """
 
         function downloadWorkingProxies() {
             const items = document.querySelectorAll('#working-list li .success');
-            const proxies = Array.from(items).map(span => span.textContent.trim()).join('\\n');
+            const proxies = Array.from(items).map(function(span) { return span.textContent.trim(); }).join('\\n');
             const blob = new Blob([proxies], {type: 'text/plain'});
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = \`proxy_funzionanti_\${sessionId.substring(0,8)}.txt\`;
+            a.download = 'proxy_funzionanti_' + sessionId.substring(0,8) + '.txt';
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
@@ -393,7 +433,7 @@ HTML_TEMPLATE = """
         }
 
         // Gestione migliorata degli eventi di chiusura
-        window.addEventListener('beforeunload', (event) => {
+        window.addEventListener('beforeunload', function(event) {
             isPageUnloading = true;
             
             // Ferma il heartbeat
@@ -425,7 +465,7 @@ HTML_TEMPLATE = """
         });
 
         // Gestione visibilità pagina (quando si cambia tab o si minimizza)
-        document.addEventListener('visibilitychange', () => {
+        document.addEventListener('visibilitychange', function() {
             if (document.hidden) {
                 console.log('Pagina nascosta');
             } else {
@@ -446,8 +486,8 @@ HTML_TEMPLATE = """
                 },
                 body: JSON.stringify({session_id: sessionId})
             })
-            .then(response => response.json())
-            .then(data => {
+            .then(function(response) { return response.json(); })
+            .then(function(data) {
                 if (data.test_running && !document.getElementById('start-test-btn').disabled) {
                     // Ripristina l'interfaccia per il test in corso
                     document.getElementById('start-test-btn').disabled = true;
@@ -462,7 +502,7 @@ HTML_TEMPLATE = """
                     resumeTestMonitoring();
                 }
             })
-            .catch(error => {
+            .catch(function(error) {
                 console.log('Nessun test attivo da riprendere');
             });
         }
@@ -470,7 +510,7 @@ HTML_TEMPLATE = """
         // Controlla se c'è un test in corso al caricamento della pagina
         window.addEventListener('load', function() {
             // Aggiungi un delay per assicurarti che la pagina sia completamente caricata
-            setTimeout(() => {
+            setTimeout(function() {
                 // Prima controlla il localStorage
                 const savedTest = localStorage.getItem('activeTest');
                 if (savedTest) {
@@ -610,12 +650,24 @@ def index():
 @app.route('/test', methods=['POST'])
 def test_proxies_stream():
     session_id = request.headers.get('X-Session-ID') or session.get('session_id', str(uuid.uuid4()))
+    
+    # Debug: stampa i dati ricevuti
+    print(f"[DEBUG] Session ID: {session_id}")
+    print(f"[DEBUG] Form data: {request.form}")
+    
     proxy_list_str = request.form.get('proxies', '')
     max_workers = int(request.form.get('max_workers', 20))
+    
+    print(f"[DEBUG] Proxy list length: {len(proxy_list_str)}")
+    print(f"[DEBUG] Max workers: {max_workers}")
+    
     proxies = [line.strip() for line in proxy_list_str.split('\n') if line.strip()]
 
     if not proxies:
+        print("[DEBUG] Nessun proxy trovato!")
         return Response("data: {\"error\": \"Nessun proxy fornito\"}\n\n", mimetype='text/event-stream')
+
+    print(f"[DEBUG] Proxies parsed: {len(proxies)}")
 
     # Limita il numero di worker per evitare sovraccarico
     max_workers = min(max_workers, 50)
@@ -997,8 +1049,8 @@ def admin_panel():
         <script>
             function loadStatus() {
                 fetch('/status')
-                .then(response => response.json())
-                .then(data => {
+                .then(function(response) { return response.json(); })
+                .then(function(data) {
                     document.getElementById('active-count').textContent = data.active_tests;
                     document.getElementById('last-update').textContent = new Date().toLocaleString();
                     
@@ -1015,22 +1067,20 @@ def admin_panel():
                         sessionsTableBody.innerHTML = '';
                         
                         // Popola tabella
-                        data.tests.forEach(test => {
+                        data.tests.forEach(function(test) {
                             const row = document.createElement('tr');
                             const statusClass = test.running ? 'running' : 'stopped';
                             const statusText = test.running ? '🟢 Attivo' : '🔴 Fermato';
-                            const progress = `${test.completed_count}/${test.total_proxies}`;
+                            const progress = test.completed_count + '/' + test.total_proxies;
                             const workers = test.max_workers || 'N/A';
                             
-                            row.innerHTML = `
-                                <td><code>${test.session_id}</code></td>
-                                <td><span class="${statusClass}">${statusText}</span></td>
-                                <td><span class="progress">${progress}</span></td>
-                                <td><span class="workers">${workers} thread</span></td>
-                                <td>${test.start_time}</td>
-                                <td>${test.start_date}</td>
-                                <td><span class="heartbeat">${test.last_heartbeat}</span></td>
-                            `;
+                            row.innerHTML = '<td><code>' + test.session_id + '</code></td>' +
+                                          '<td><span class="' + statusClass + '">' + statusText + '</span></td>' +
+                                          '<td><span class="progress">' + progress + '</span></td>' +
+                                          '<td><span class="workers">' + workers + ' thread</span></td>' +
+                                          '<td>' + test.start_time + '</td>' +
+                                          '<td>' + test.start_date + '</td>' +
+                                          '<td><span class="heartbeat">' + test.last_heartbeat + '</span></td>';
                             sessionsTableBody.appendChild(row);
                         });
                     } else {
@@ -1040,7 +1090,7 @@ def admin_panel():
                         sessionsList.innerHTML = '<p>🎉 Nessuna sessione attiva</p>';
                     }
                 })
-                .catch(error => {
+                .catch(function(error) {
                     console.error('Errore:', error);
                     alert('Errore nel caricamento dello stato. Verifica le credenziali.');
                 });
