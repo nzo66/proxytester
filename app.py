@@ -225,8 +225,62 @@ HTML_TEMPLATE = """
             URL.revokeObjectURL(url);
         }
 
-        window.addEventListener('beforeunload', () => {
-            if (abortController) abortController.abort();
+        // Gestione migliorata del reload della pagina
+        window.addEventListener('beforeunload', (event) => {
+            // Interrompi la connessione fetch
+            if (abortController) {
+                abortController.abort();
+            }
+            
+            // Invia richiesta di stop al server usando sendBeacon
+            if (document.getElementById('start-test-btn').disabled) {
+                const data = JSON.stringify({session_id: sessionId});
+                
+                if (navigator.sendBeacon) {
+                    navigator.sendBeacon('/stop', data);
+                } else {
+                    // Fallback per browser più vecchi
+                    fetch('/stop', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Session-ID': sessionId
+                        },
+                        body: data,
+                        keepalive: true
+                    });
+                }
+                
+                // Mostra avviso all'utente
+                event.preventDefault();
+                event.returnValue = 'Un test è in corso. Sei sicuro di voler uscire?';
+                return event.returnValue;
+            }
+        });
+
+        // Controlla se c'è un test in corso al caricamento della pagina
+        window.addEventListener('load', function() {
+            fetch('/status/check', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Session-ID': sessionId
+                },
+                body: JSON.stringify({session_id: sessionId})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.test_running) {
+                    // Riprendi il test dalla pagina ricaricata
+                    document.getElementById('start-test-btn').disabled = true;
+                    document.getElementById('start-test-btn').innerText = 'Test in corso...';
+                    document.getElementById('stop-test-btn').disabled = false;
+                    document.getElementById('status-bar').innerText = 'Test ripreso dopo ricaricamento pagina...';
+                }
+            })
+            .catch(error => {
+                console.log('Nessun test attivo da riprendere');
+            });
         });
     </script>
 </body>
@@ -309,6 +363,26 @@ def test_single_proxy(proxy_line, proxy_type, address_for_curl, session_id):
     except Exception as e:
         return {'status': 'FAIL', 'details': f'Errore esecuzione script: {e}', 'is_protocol_error': False}
 
+def cleanup_abandoned_sessions():
+    """Pulisce le sessioni abbandonate dopo 5 minuti"""
+    current_time = datetime.now()
+    abandoned_sessions = []
+    
+    with active_tests_lock:
+        for session_id, info in active_tests.items():
+            if (current_time - info['start_time']).total_seconds() > 300:  # 5 minuti
+                abandoned_sessions.append(session_id)
+        
+        for session_id in abandoned_sessions:
+            active_tests[session_id]['running'] = False
+            del active_tests[session_id]
+            print(f"[{session_id[:8]}] Sessione abbandonata pulita automaticamente")
+
+# Timer per pulizia automatica delle sessioni abbandonate
+def start_cleanup_timer():
+    cleanup_abandoned_sessions()
+    threading.Timer(120, start_cleanup_timer).start()
+
 @app.route('/')
 def index():
     # Crea una sessione unica per ogni utente
@@ -325,6 +399,9 @@ def test_proxies_stream():
     session_id = request.headers.get('X-Session-ID') or session.get('session_id', str(uuid.uuid4()))
     proxy_list_str = request.form.get('proxies', '')
     proxies = [line.strip() for line in proxy_list_str.split('\n') if line.strip()]
+
+    if not proxies:
+        return Response("data: {\"error\": \"Nessun proxy fornito\"}\n\n", mimetype='text/event-stream')
 
     # Registra il test attivo
     with active_tests_lock:
@@ -384,21 +461,37 @@ def test_proxies_stream():
                     data_to_send['proxy_to_save'] = proxy_to_save
 
                 print(f"[{session_id[:8]}] Risultato per {line}: {data_to_send}")
-                yield f"data: {json.dumps(data_to_send)}\n\n"
+                
+                try:
+                    yield f"data: {json.dumps(data_to_send)}\n\n"
+                except GeneratorExit:
+                    print(f"[{session_id[:8]}] Client disconnesso durante il test")
+                    break
+                except Exception as e:
+                    print(f"[{session_id[:8]}] Errore invio dati: {e}")
+                    break
         
+        except GeneratorExit:
+            print(f"[{session_id[:8]}] Generatore interrotto")
         finally:
-            # Pulisci il test attivo
+            # Pulisci sempre il test attivo
             with active_tests_lock:
                 if session_id in active_tests:
+                    active_tests[session_id]['running'] = False
                     del active_tests[session_id]
+                    print(f"[{session_id[:8]}] Test pulito dopo disconnessione")
     
     return Response(generate_results(), mimetype='text/event-stream')
 
 @app.route('/stop', methods=['POST'])
 def stop_test():
-    """Endpoint per fermare un test in corso"""
-    data = request.get_json()
-    session_id = data.get('session_id') if data else None
+    """Endpoint migliorato per fermare un test in corso"""
+    try:
+        # Prova a leggere JSON
+        data = request.get_json(silent=True)
+        session_id = data.get('session_id') if data else None
+    except:
+        session_id = None
     
     if not session_id:
         session_id = request.headers.get('X-Session-ID') or session.get('session_id')
@@ -407,9 +500,29 @@ def stop_test():
         with active_tests_lock:
             if session_id in active_tests:
                 active_tests[session_id]['running'] = False
-                print(f"[{session_id[:8]}] Test fermato dall'utente")
+                print(f"[{session_id[:8]}] Test fermato dall'utente (reload/navigazione)")
+                return {'status': 'stopped', 'session_id': session_id[:8]}
     
-    return {'status': 'stopped'}
+    return {'status': 'session_not_found'}, 404
+
+@app.route('/status/check', methods=['POST'])
+def check_session_status():
+    """Controlla se una sessione ha un test attivo"""
+    try:
+        data = request.get_json(silent=True)
+        session_id = data.get('session_id') if data else None
+    except:
+        session_id = None
+    
+    if not session_id:
+        session_id = request.headers.get('X-Session-ID') or session.get('session_id')
+    
+    if session_id:
+        with active_tests_lock:
+            if session_id in active_tests and active_tests[session_id]['running']:
+                return {'test_running': True, 'session_id': session_id[:8]}
+    
+    return {'test_running': False}
 
 @app.route('/status')
 @require_auth
@@ -562,4 +675,8 @@ if __name__ == '__main__':
     print("Admin panel: http://127.0.0.1:7860/admin")
     print("Status API: http://127.0.0.1:7860/status")
     print(f"Admin password: {os.getenv('ADMIN_PASSWORD', 'admin123')}")
+    
+    # Avvia il timer di pulizia automatica
+    start_cleanup_timer()
+    
     app.run(host='0.0.0.0', port=7860, debug=False, threaded=True)
