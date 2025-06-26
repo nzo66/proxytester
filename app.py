@@ -69,6 +69,7 @@ HTML_TEMPLATE = """
         .failure { color: #dc3545; }
         .protocol { font-size: 0.8em; color: #666; background-color: #e9ecef; padding: 2px 5px; border-radius: 3px; margin-left: 5px; }
         .session-info { background: #e3f2fd; padding: 10px; border-radius: 5px; margin-bottom: 20px; font-size: 14px; }
+        .resume-notice { background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 10px; border-radius: 5px; margin-bottom: 20px; }
     </style>
 </head>
 <body>
@@ -77,6 +78,9 @@ HTML_TEMPLATE = """
         <div class="session-info">
             <strong>ID Sessione:</strong> <span id="session-id">{{ session_id }}</span> | 
             <strong>Avviato:</strong> <span id="session-time">{{ session_time }}</span>
+        </div>
+        <div id="resume-notice" class="resume-notice" style="display:none;">
+            ⚠️ Test ripreso dopo ricaricamento pagina. I risultati precedenti potrebbero non essere visibili.
         </div>
         <p>Incolla la tua lista di proxy (uno per riga) nel box sottostante e avvia il test.</p>
         <textarea id="proxy-list" placeholder="1.2.3.4:8080\nsocks5://user:pass@5.6.7.8:1080\n..."></textarea>
@@ -101,6 +105,7 @@ HTML_TEMPLATE = """
     <script>
         let abortController = null;
         const sessionId = '{{ session_id }}';
+        let isTestResumed = false;
 
         function startTest() {
             const proxyList = document.getElementById('proxy-list').value;
@@ -110,6 +115,13 @@ HTML_TEMPLATE = """
                 alert('Per favore, inserisci almeno un proxy.');
                 return;
             }
+
+            // Salva lo stato nel localStorage
+            localStorage.setItem('activeTest', JSON.stringify({
+                sessionId: sessionId,
+                proxies: proxies,
+                startTime: Date.now()
+            }));
 
             // Reset UI
             document.getElementById('working-list').innerHTML = '';
@@ -149,6 +161,8 @@ HTML_TEMPLATE = """
                             testButton.innerText = 'Avvia Test';
                             document.getElementById('stop-test-btn').disabled = true;
                             statusBar.innerText = `Test completato: ${testedCount} / ${proxies.length}`;
+                            // Rimuovi lo stato dal localStorage al completamento
+                            localStorage.removeItem('activeTest');
                             return;
                         }
                         buffer += new TextDecoder().decode(value, {stream:true});
@@ -189,6 +203,8 @@ HTML_TEMPLATE = """
                 testButton.disabled = false;
                 testButton.innerText = 'Avvia Test';
                 document.getElementById('stop-test-btn').disabled = true;
+                // Rimuovi lo stato dal localStorage in caso di errore
+                localStorage.removeItem('activeTest');
             });
         }
 
@@ -209,6 +225,81 @@ HTML_TEMPLATE = """
             document.getElementById('start-test-btn').innerText = 'Avvia Test';
             document.getElementById('stop-test-btn').disabled = true;
             document.getElementById('status-bar').innerText = 'Test interrotto.';
+            
+            // Rimuovi lo stato dal localStorage
+            localStorage.removeItem('activeTest');
+        }
+
+        function resumeTestMonitoring() {
+            if (abortController) abortController.abort();
+            abortController = new AbortController();
+            
+            fetch('/test/resume', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Session-ID': sessionId
+                },
+                body: JSON.stringify({session_id: sessionId}),
+                signal: abortController.signal
+            }).then(response => {
+                if (!response.ok) {
+                    throw new Error('Sessione non trovata');
+                }
+                
+                const reader = response.body.getReader();
+                let buffer = '';
+                function read() {
+                    reader.read().then(({done, value}) => {
+                        if (done) {
+                            document.getElementById('start-test-btn').disabled = false;
+                            document.getElementById('start-test-btn').innerText = 'Avvia Test';
+                            document.getElementById('stop-test-btn').disabled = true;
+                            document.getElementById('status-bar').innerText = 'Test completato';
+                            localStorage.removeItem('activeTest');
+                            return;
+                        }
+                        buffer += new TextDecoder().decode(value, {stream:true});
+                        let parts = buffer.split('\\n\\n');
+                        buffer = parts.pop();
+                        for (let part of parts) {
+                            if (part.startsWith('data: ')) {
+                                const data = JSON.parse(part.slice(6));
+                                
+                                if (data.status === 'RESUMED') {
+                                    document.getElementById('status-bar').innerText = data.message;
+                                    continue;
+                                }
+                                
+                                if (data.status === 'SUCCESS') {
+                                    const list = document.getElementById('working-list');
+                                    const item = document.createElement('li');
+                                    item.innerHTML = `<span class="success">${data.proxy_to_save}</span> <span class="protocol">${data.protocol_used}</span>`;
+                                    list.appendChild(item);
+                                    const currentCount = parseInt(document.getElementById('working-count').innerText);
+                                    document.getElementById('working-count').innerText = currentCount + 1;
+                                    document.getElementById('download-btn').disabled = false;
+                                } else if (data.status === 'FAIL') {
+                                    const list = document.getElementById('failed-list');
+                                    const item = document.createElement('li');
+                                    item.innerHTML = `<span class="failure">${data.proxy}</span> - ${data.details}`;
+                                    list.appendChild(item);
+                                    const currentCount = parseInt(document.getElementById('failed-count').innerText);
+                                    document.getElementById('failed-count').innerText = currentCount + 1;
+                                }
+                            }
+                        }
+                        read();
+                    });
+                }
+                read();
+            }).catch(error => {
+                console.error('Errore nel riprendere il test:', error);
+                document.getElementById('start-test-btn').disabled = false;
+                document.getElementById('start-test-btn').innerText = 'Avvia Test';
+                document.getElementById('stop-test-btn').disabled = true;
+                document.getElementById('status-bar').innerText = 'Errore nel riprendere il test';
+            });
         }
 
         function downloadWorkingProxies() {
@@ -227,60 +318,68 @@ HTML_TEMPLATE = """
 
         // Gestione migliorata del reload della pagina
         window.addEventListener('beforeunload', (event) => {
-            // Interrompi la connessione fetch
-            if (abortController) {
-                abortController.abort();
-            }
-            
-            // Invia richiesta di stop al server usando sendBeacon
-            if (document.getElementById('start-test-btn').disabled) {
-                const data = JSON.stringify({session_id: sessionId});
-                
-                if (navigator.sendBeacon) {
-                    navigator.sendBeacon('/stop', data);
-                } else {
-                    // Fallback per browser più vecchi
-                    fetch('/stop', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-Session-ID': sessionId
-                        },
-                        body: data,
-                        keepalive: true
-                    });
+            // Solo per chiusura definitiva, non per reload
+            if (performance.navigation && performance.navigation.type !== performance.navigation.TYPE_RELOAD) {
+                if (abortController) {
+                    abortController.abort();
                 }
                 
-                // Mostra avviso all'utente
-                event.preventDefault();
-                event.returnValue = 'Un test è in corso. Sei sicuro di voler uscire?';
-                return event.returnValue;
+                if (document.getElementById('start-test-btn').disabled) {
+                    const data = JSON.stringify({session_id: sessionId});
+                    
+                    if (navigator.sendBeacon) {
+                        navigator.sendBeacon('/stop', data);
+                    }
+                    
+                    event.preventDefault();
+                    event.returnValue = 'Un test è in corso. Sei sicuro di voler uscire?';
+                    return event.returnValue;
+                }
             }
         });
 
         // Controlla se c'è un test in corso al caricamento della pagina
         window.addEventListener('load', function() {
-            fetch('/status/check', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Session-ID': sessionId
-                },
-                body: JSON.stringify({session_id: sessionId})
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.test_running) {
-                    // Riprendi il test dalla pagina ricaricata
-                    document.getElementById('start-test-btn').disabled = true;
-                    document.getElementById('start-test-btn').innerText = 'Test in corso...';
-                    document.getElementById('stop-test-btn').disabled = false;
-                    document.getElementById('status-bar').innerText = 'Test ripreso dopo ricaricamento pagina...';
+            // Aggiungi un delay per assicurarti che la pagina sia completamente caricata
+            setTimeout(() => {
+                // Prima controlla il localStorage
+                const savedTest = localStorage.getItem('activeTest');
+                if (savedTest) {
+                    const testData = JSON.parse(savedTest);
+                    // Verifica se il test è recente (meno di 10 minuti)
+                    if (Date.now() - testData.startTime < 600000) {
+                        document.getElementById('proxy-list').value = testData.proxies.join('\\n');
+                    }
                 }
-            })
-            .catch(error => {
-                console.log('Nessun test attivo da riprendere');
-            });
+                
+                // Poi controlla lo stato sul server
+                fetch('/status/check', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Session-ID': sessionId
+                    },
+                    body: JSON.stringify({session_id: sessionId})
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.test_running) {
+                        // Ripristina l'interfaccia per il test in corso
+                        document.getElementById('start-test-btn').disabled = true;
+                        document.getElementById('start-test-btn').innerText = 'Test in corso...';
+                        document.getElementById('stop-test-btn').disabled = false;
+                        document.getElementById('status-bar').innerText = 'Test ripreso dopo ricaricamento pagina...';
+                        document.getElementById('resume-notice').style.display = 'block';
+                        
+                        // Riavvia il monitoraggio dei risultati
+                        isTestResumed = true;
+                        resumeTestMonitoring();
+                    }
+                })
+                .catch(error => {
+                    console.log('Nessun test attivo da riprendere');
+                });
+            }, 500);
         });
     </script>
 </body>
@@ -364,13 +463,13 @@ def test_single_proxy(proxy_line, proxy_type, address_for_curl, session_id):
         return {'status': 'FAIL', 'details': f'Errore esecuzione script: {e}', 'is_protocol_error': False}
 
 def cleanup_abandoned_sessions():
-    """Pulisce le sessioni abbandonate dopo 5 minuti"""
+    """Pulisce le sessioni abbandonate dopo 10 minuti (aumentato per gestire i reload)"""
     current_time = datetime.now()
     abandoned_sessions = []
     
     with active_tests_lock:
         for session_id, info in active_tests.items():
-            if (current_time - info['start_time']).total_seconds() > 300:  # 5 minuti
+            if (current_time - info['start_time']).total_seconds() > 600:  # 10 minuti
                 abandoned_sessions.append(session_id)
         
         for session_id in abandoned_sessions:
@@ -408,7 +507,9 @@ def test_proxies_stream():
         active_tests[session_id] = {
             'running': True,
             'start_time': datetime.now(),
-            'total_proxies': len(proxies)
+            'total_proxies': len(proxies),
+            'proxies': proxies,
+            'current_index': 0
         }
 
     def generate_results():
@@ -448,6 +549,11 @@ def test_proxies_stream():
                 if result['status'] == 'STOPPED':
                     break
 
+                # Aggiorna l'indice corrente
+                with active_tests_lock:
+                    if session_id in active_tests:
+                        active_tests[session_id]['current_index'] += 1
+
                 data_to_send = result.copy()
                 data_to_send['proxy'] = line
                 
@@ -483,6 +589,91 @@ def test_proxies_stream():
     
     return Response(generate_results(), mimetype='text/event-stream')
 
+@app.route('/test/resume', methods=['POST'])
+def resume_test_monitoring():
+    """Riprende il monitoraggio di una sessione esistente"""
+    data = request.get_json()
+    session_id = data.get('session_id')
+    
+    with active_tests_lock:
+        if session_id in active_tests and active_tests[session_id]['running']:
+            # La sessione esiste ed è attiva
+            test_info = active_tests[session_id]
+            proxies = test_info['proxies']
+            current_index = test_info['current_index']
+            
+            def generate_status():
+                yield f"data: {{\"status\": \"RESUMED\", \"message\": \"Sessione ripresa - continuando dal proxy {current_index + 1}/{len(proxies)}\"}}\n\n"
+                
+                # Continua dal punto in cui si era interrotto
+                for i in range(current_index, len(proxies)):
+                    # Controlla se il test è ancora attivo
+                    with active_tests_lock:
+                        if session_id not in active_tests or not active_tests[session_id]['running']:
+                            break
+                    
+                    line = proxies[i]
+                    result = None
+                    
+                    # Test del proxy con gestione protocolli
+                    if line.startswith(('socks5h://', 'socks5://')):
+                        proxy_address = line.split('//', 1)[1]
+                        result = test_single_proxy(line, 'socks5', proxy_address, session_id)
+                    elif line.startswith(('http://', 'https://')):
+                        result = test_single_proxy(line, 'http', line, session_id)
+                    else:
+                        # Prova prima come HTTP
+                        result_http = test_single_proxy(line, 'http', line, session_id)
+                        if result_http['status'] == 'SUCCESS':
+                            result = result_http
+                        elif result_http['status'] == 'STOPPED':
+                            result = result_http
+                        else:
+                            # Se fallisce, prova come SOCKS5
+                            result_socks = test_single_proxy(line, 'socks5', line, session_id)
+                            if result_socks['status'] == 'SUCCESS':
+                                result = result_socks
+                            elif result_socks['status'] == 'STOPPED':
+                                result = result_socks
+                            else:
+                                result = result_http
+
+                    # Se il test è stato fermato, interrompi
+                    if result['status'] == 'STOPPED':
+                        break
+
+                    # Aggiorna l'indice corrente
+                    with active_tests_lock:
+                        if session_id in active_tests:
+                            active_tests[session_id]['current_index'] = i + 1
+
+                    data_to_send = result.copy()
+                    data_to_send['proxy'] = line
+                    
+                    if result['status'] == 'SUCCESS':
+                        protocol_used = result.get('protocol_used', 'sconosciuto')
+                        proxy_to_save = line
+                        if protocol_used == 'http' and not line.startswith(('http://', 'https://')):
+                            proxy_to_save = f"http://{line}"
+                        elif protocol_used == 'socks5' and not line.startswith(('socks5://', 'socks5h://')):
+                            proxy_to_save = f"socks5://{line}"
+                        data_to_send['proxy_to_save'] = proxy_to_save
+
+                    try:
+                        yield f"data: {json.dumps(data_to_send)}\n\n"
+                    except GeneratorExit:
+                        break
+                
+                # Pulisci il test al completamento
+                with active_tests_lock:
+                    if session_id in active_tests:
+                        active_tests[session_id]['running'] = False
+                        del active_tests[session_id]
+            
+            return Response(generate_status(), mimetype='text/event-stream')
+    
+    return {'error': 'Sessione non trovata o non attiva'}, 404
+
 @app.route('/stop', methods=['POST'])
 def stop_test():
     """Endpoint migliorato per fermare un test in corso"""
@@ -500,7 +691,7 @@ def stop_test():
         with active_tests_lock:
             if session_id in active_tests:
                 active_tests[session_id]['running'] = False
-                print(f"[{session_id[:8]}] Test fermato dall'utente (reload/navigazione)")
+                print(f"[{session_id[:8]}] Test fermato dall'utente")
                 return {'status': 'stopped', 'session_id': session_id[:8]}
     
     return {'status': 'session_not_found'}, 404
@@ -520,7 +711,13 @@ def check_session_status():
     if session_id:
         with active_tests_lock:
             if session_id in active_tests and active_tests[session_id]['running']:
-                return {'test_running': True, 'session_id': session_id[:8]}
+                test_info = active_tests[session_id]
+                return {
+                    'test_running': True, 
+                    'session_id': session_id[:8],
+                    'current_index': test_info.get('current_index', 0),
+                    'total_proxies': test_info.get('total_proxies', 0)
+                }
     
     return {'test_running': False}
 
@@ -538,15 +735,17 @@ def get_status():
                 'running': info['running'],
                 'start_time': info['start_time'].strftime('%H:%M:%S'),
                 'start_date': info['start_time'].strftime('%Y-%m-%d'),
-                'total_proxies': info['total_proxies']
+                'total_proxies': info['total_proxies'],
+                'current_index': info.get('current_index', 0)
             })
     
     return {
         'active_tests': active_count,
         'tests': tests_info,
         'server_info': {
-            'version': '2.0',
+            'version': '2.1',
             'multi_user': True,
+            'resume_support': True,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     }
@@ -576,6 +775,7 @@ def admin_panel():
             th { background-color: #f2f2f2; }
             .running { color: #28a745; font-weight: bold; }
             .stopped { color: #dc3545; font-weight: bold; }
+            .progress { font-size: 0.9em; color: #666; }
         </style>
     </head>
     <body>
@@ -583,7 +783,7 @@ def admin_panel():
             <h1>🔧 Admin Panel - Proxy Tester</h1>
             <div class="status-box">
                 <h3>Stato Server</h3>
-                <p><strong>Versione:</strong> 2.0 Multi-User</p>
+                <p><strong>Versione:</strong> 2.1 Multi-User con Resume</p>
                 <p><strong>Sessioni Attive:</strong> <span id="active-count">-</span></p>
                 <p><strong>Ultimo Aggiornamento:</strong> <span id="last-update">-</span></p>
             </div>
@@ -600,9 +800,9 @@ def admin_panel():
                         <tr>
                             <th>ID Sessione</th>
                             <th>Stato</th>
+                            <th>Progresso</th>
                             <th>Avviato</th>
                             <th>Data</th>
-                            <th>Proxy Totali</th>
                         </tr>
                     </thead>
                     <tbody id="sessions-tbody">
@@ -636,13 +836,14 @@ def admin_panel():
                             const row = document.createElement('tr');
                             const statusClass = test.running ? 'running' : 'stopped';
                             const statusText = test.running ? '🟢 Attivo' : '🔴 Fermato';
+                            const progress = `${test.current_index}/${test.total_proxies}`;
                             
                             row.innerHTML = `
                                 <td><code>${test.session_id}</code></td>
                                 <td><span class="${statusClass}">${statusText}</span></td>
+                                <td><span class="progress">${progress}</span></td>
                                 <td>${test.start_time}</td>
                                 <td>${test.start_date}</td>
-                                <td>${test.total_proxies}</td>
                             `;
                             sessionsTableBody.appendChild(row);
                         });
@@ -670,7 +871,7 @@ def admin_panel():
     """)
 
 if __name__ == '__main__':
-    print("Avvio del server Proxy Tester Web Multi-Utente...")
+    print("Avvio del server Proxy Tester Web Multi-Utente con Resume...")
     print("Apri http://127.0.0.1:7860 nel tuo browser.")
     print("Admin panel: http://127.0.0.1:7860/admin")
     print("Status API: http://127.0.0.1:7860/status")
