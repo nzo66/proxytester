@@ -3,7 +3,7 @@ import json
 import uuid
 import threading
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, Response, render_template_string, session, jsonify
 from datetime import datetime
 from functools import wraps
@@ -47,7 +47,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Proxy Tester Web</title>
+    <title>Proxy Tester Web - Parallelo</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; color: #333; }
         .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
@@ -70,25 +70,44 @@ HTML_TEMPLATE = """
         .protocol { font-size: 0.8em; color: #666; background-color: #e9ecef; padding: 2px 5px; border-radius: 3px; margin-left: 5px; }
         .session-info { background: #e3f2fd; padding: 10px; border-radius: 5px; margin-bottom: 20px; font-size: 14px; }
         .resume-notice { background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 10px; border-radius: 5px; margin-bottom: 20px; }
+        .parallel-info { background: #e8f5e8; border: 1px solid #4caf50; color: #2e7d32; padding: 10px; border-radius: 5px; margin-bottom: 20px; }
+        .config-section { background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+        .config-section label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .config-section input[type="number"] { width: 80px; padding: 5px; border: 1px solid #ccc; border-radius: 3px; }
+        .progress-bar { width: 100%; height: 20px; background-color: #e0e0e0; border-radius: 10px; overflow: hidden; margin: 10px 0; }
+        .progress-fill { height: 100%; background-color: #4caf50; transition: width 0.3s ease; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🌐 Web Proxy Tester</h1>
+        <h1>🚀 Web Proxy Tester - Parallelo</h1>
         <div class="session-info">
             <strong>ID Sessione:</strong> <span id="session-id">{{ session_id }}</span> | 
             <strong>Avviato:</strong> <span id="session-time">{{ session_time }}</span>
         </div>
+        <div class="parallel-info">
+            ⚡ <strong>Modalità Parallela Attiva:</strong> I proxy vengono testati contemporaneamente per maggiore velocità!
+        </div>
         <div id="resume-notice" class="resume-notice" style="display:none;">
             ⚠️ Test ripreso dopo ricaricamento pagina. I risultati precedenti potrebbero non essere visibili.
         </div>
-        <p>Incolla la tua lista di proxy (uno per riga) nel box sottostante e avvia il test.</p>
+        
+        <div class="config-section">
+            <label for="max-workers">Numero massimo di test paralleli:</label>
+            <input type="number" id="max-workers" value="20" min="1" max="50">
+            <small style="color: #666; margin-left: 10px;">Raccomandato: 10-30 (più alto = più veloce ma usa più risorse)</small>
+        </div>
+        
+        <p>Incolla la tua lista di proxy (uno per riga) nel box sottostante e avvia il test parallelo.</p>
         <textarea id="proxy-list" placeholder="1.2.3.4:8080\nsocks5://user:pass@5.6.7.8:1080\n..."></textarea>
-        <button id="start-test-btn" class="btn" onclick="startTest()">Avvia Test</button>
-        <button id="download-btn" class="btn" style="background:#28a745;margin-top:10px;" onclick="downloadWorkingProxies()" disabled>Scarica Proxy Funzionanti</button>
-        <button id="stop-test-btn" class="btn" style="background:#dc3545;margin-top:10px;" onclick="stopTest()" disabled>Stop Test</button>
+        <button id="start-test-btn" class="btn" onclick="startTest()">🚀 Avvia Test Parallelo</button>
+        <button id="download-btn" class="btn" style="background:#28a745;margin-top:10px;" onclick="downloadWorkingProxies()" disabled>📥 Scarica Proxy Funzionanti</button>
+        <button id="stop-test-btn" class="btn" style="background:#dc3545;margin-top:10px;" onclick="stopTest()" disabled>⏹️ Stop Test</button>
         
         <div id="status-bar" class="status-bar"></div>
+        <div class="progress-bar">
+            <div id="progress-fill" class="progress-fill" style="width: 0%;"></div>
+        </div>
 
         <div class="results-container">
             <div id="working-proxies" class="result-box">
@@ -135,9 +154,15 @@ HTML_TEMPLATE = """
             }
         }
 
+        function updateProgress(completed, total) {
+            const percentage = total > 0 ? (completed / total) * 100 : 0;
+            document.getElementById('progress-fill').style.width = percentage + '%';
+        }
+
         function startTest() {
             const proxyList = document.getElementById('proxy-list').value;
             const proxies = proxyList.split('\\n').map(p => p.trim()).filter(p => p);
+            const maxWorkers = parseInt(document.getElementById('max-workers').value) || 20;
             
             if (proxies.length === 0) {
                 alert('Per favore, inserisci almeno un proxy.');
@@ -148,6 +173,7 @@ HTML_TEMPLATE = """
             localStorage.setItem('activeTest', JSON.stringify({
                 sessionId: sessionId,
                 proxies: proxies,
+                maxWorkers: maxWorkers,
                 startTime: Date.now()
             }));
 
@@ -156,20 +182,23 @@ HTML_TEMPLATE = """
             document.getElementById('failed-list').innerHTML = '';
             document.getElementById('working-count').innerText = '0';
             document.getElementById('failed-count').innerText = '0';
+            updateProgress(0, proxies.length);
+            
             const statusBar = document.getElementById('status-bar');
             const testButton = document.getElementById('start-test-btn');
             testButton.disabled = true;
-            testButton.innerText = 'Test in corso...';
+            testButton.innerText = '🚀 Test Parallelo in Corso...';
             document.getElementById('stop-test-btn').disabled = false;
+            document.getElementById('max-workers').disabled = true;
             
             // Avvia heartbeat
             startHeartbeat();
             
-            let testedCount = 0;
+            let completedCount = 0;
             let workingCount = 0;
             let failedCount = 0;
 
-            statusBar.innerText = `Test in corso... 0 / ${proxies.length}`;
+            statusBar.innerText = `Test parallelo avviato con ${maxWorkers} thread... 0 / ${proxies.length} completati`;
 
             if (abortController) abortController.abort();
             abortController = new AbortController();
@@ -180,7 +209,7 @@ HTML_TEMPLATE = """
                     'Content-Type': 'application/x-www-form-urlencoded',
                     'X-Session-ID': sessionId
                 },
-                body: 'proxies=' + encodeURIComponent(proxyList),
+                body: 'proxies=' + encodeURIComponent(proxyList) + '&max_workers=' + maxWorkers,
                 signal: abortController.signal
             }).then(response => {
                 const reader = response.body.getReader();
@@ -189,10 +218,11 @@ HTML_TEMPLATE = """
                     reader.read().then(({done, value}) => {
                         if (done) {
                             testButton.disabled = false;
-                            testButton.innerText = 'Avvia Test';
+                            testButton.innerText = '🚀 Avvia Test Parallelo';
                             document.getElementById('stop-test-btn').disabled = true;
-                            statusBar.innerText = `Test completato: ${testedCount} / ${proxies.length}`;
-                            // Ferma heartbeat e rimuovi stato dal localStorage
+                            document.getElementById('max-workers').disabled = false;
+                            statusBar.innerText = `✅ Test completato: ${completedCount} / ${proxies.length} (${workingCount} funzionanti, ${failedCount} falliti)`;
+                            updateProgress(proxies.length, proxies.length);
                             stopHeartbeat();
                             localStorage.removeItem('activeTest');
                             return;
@@ -203,21 +233,23 @@ HTML_TEMPLATE = """
                         for (let part of parts) {
                             if (part.startsWith('data: ')) {
                                 const data = JSON.parse(part.slice(6));
-                                testedCount++;
-                                statusBar.innerText = `Test in corso... ${testedCount} / ${proxies.length}`;
+                                completedCount++;
+                                updateProgress(completedCount, proxies.length);
+                                statusBar.innerText = `⚡ Test parallelo: ${completedCount} / ${proxies.length} completati (${workingCount} ✅, ${failedCount} ❌)`;
+                                
                                 if (data.status === 'SUCCESS') {
                                     workingCount++;
                                     const list = document.getElementById('working-list');
                                     const item = document.createElement('li');
-                                    item.innerHTML = `<span class="success">${data.proxy_to_save}</span> <span class="protocol">${data.protocol_used}</span>`;
+                                    item.innerHTML = \`<span class="success">\${data.proxy_to_save}</span> <span class="protocol">\${data.protocol_used}</span>\`;
                                     list.appendChild(item);
                                     document.getElementById('working-count').innerText = workingCount;
                                     document.getElementById('download-btn').disabled = false;
-                                } else {
+                                } else if (data.status === 'FAIL') {
                                     failedCount++;
                                     const list = document.getElementById('failed-list');
                                     const item = document.createElement('li');
-                                    item.innerHTML = `<span class="failure">${data.proxy}</span> - ${data.details}`;
+                                    item.innerHTML = \`<span class="failure">\${data.proxy}</span> - \${data.details}\`;
                                     list.appendChild(item);
                                     document.getElementById('failed-count').innerText = failedCount;
                                 }
@@ -230,12 +262,12 @@ HTML_TEMPLATE = """
             }).catch(error => {
                 if (error.name !== 'AbortError') {
                     console.error('Errore durante il test:', error);
-                    statusBar.innerText = 'Errore durante il test';
+                    statusBar.innerText = '❌ Errore durante il test';
                 }
                 testButton.disabled = false;
-                testButton.innerText = 'Avvia Test';
+                testButton.innerText = '🚀 Avvia Test Parallelo';
                 document.getElementById('stop-test-btn').disabled = true;
-                // Ferma heartbeat e rimuovi stato dal localStorage
+                document.getElementById('max-workers').disabled = false;
                 stopHeartbeat();
                 localStorage.removeItem('activeTest');
             });
@@ -258,9 +290,10 @@ HTML_TEMPLATE = """
             });
 
             document.getElementById('start-test-btn').disabled = false;
-            document.getElementById('start-test-btn').innerText = 'Avvia Test';
+            document.getElementById('start-test-btn').innerText = '🚀 Avvia Test Parallelo';
             document.getElementById('stop-test-btn').disabled = true;
-            document.getElementById('status-bar').innerText = 'Test interrotto.';
+            document.getElementById('max-workers').disabled = false;
+            document.getElementById('status-bar').innerText = '⏹️ Test interrotto.';
             
             // Rimuovi lo stato dal localStorage
             localStorage.removeItem('activeTest');
@@ -292,9 +325,10 @@ HTML_TEMPLATE = """
                     reader.read().then(({done, value}) => {
                         if (done) {
                             document.getElementById('start-test-btn').disabled = false;
-                            document.getElementById('start-test-btn').innerText = 'Avvia Test';
+                            document.getElementById('start-test-btn').innerText = '🚀 Avvia Test Parallelo';
                             document.getElementById('stop-test-btn').disabled = true;
-                            document.getElementById('status-bar').innerText = 'Test completato';
+                            document.getElementById('max-workers').disabled = false;
+                            document.getElementById('status-bar').innerText = '✅ Test completato';
                             stopHeartbeat();
                             localStorage.removeItem('activeTest');
                             return;
@@ -314,7 +348,7 @@ HTML_TEMPLATE = """
                                 if (data.status === 'SUCCESS') {
                                     const list = document.getElementById('working-list');
                                     const item = document.createElement('li');
-                                    item.innerHTML = `<span class="success">${data.proxy_to_save}</span> <span class="protocol">${data.protocol_used}</span>`;
+                                    item.innerHTML = \`<span class="success">\${data.proxy_to_save}</span> <span class="protocol">\${data.protocol_used}</span>\`;
                                     list.appendChild(item);
                                     const currentCount = parseInt(document.getElementById('working-count').innerText);
                                     document.getElementById('working-count').innerText = currentCount + 1;
@@ -322,7 +356,7 @@ HTML_TEMPLATE = """
                                 } else if (data.status === 'FAIL') {
                                     const list = document.getElementById('failed-list');
                                     const item = document.createElement('li');
-                                    item.innerHTML = `<span class="failure">${data.proxy}</span> - ${data.details}`;
+                                    item.innerHTML = \`<span class="failure">\${data.proxy}</span> - \${data.details}\`;
                                     list.appendChild(item);
                                     const currentCount = parseInt(document.getElementById('failed-count').innerText);
                                     document.getElementById('failed-count').innerText = currentCount + 1;
@@ -336,9 +370,10 @@ HTML_TEMPLATE = """
             }).catch(error => {
                 console.error('Errore nel riprendere il test:', error);
                 document.getElementById('start-test-btn').disabled = false;
-                document.getElementById('start-test-btn').innerText = 'Avvia Test';
+                document.getElementById('start-test-btn').innerText = '🚀 Avvia Test Parallelo';
                 document.getElementById('stop-test-btn').disabled = true;
-                document.getElementById('status-bar').innerText = 'Errore nel riprendere il test';
+                document.getElementById('max-workers').disabled = false;
+                document.getElementById('status-bar').innerText = '❌ Errore nel riprendere il test';
                 stopHeartbeat();
             });
         }
@@ -350,7 +385,7 @@ HTML_TEMPLATE = """
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `proxy_funzionanti_${sessionId.substring(0,8)}.txt`;
+            a.download = \`proxy_funzionanti_\${sessionId.substring(0,8)}.txt\`;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
@@ -416,9 +451,10 @@ HTML_TEMPLATE = """
                 if (data.test_running && !document.getElementById('start-test-btn').disabled) {
                     // Ripristina l'interfaccia per il test in corso
                     document.getElementById('start-test-btn').disabled = true;
-                    document.getElementById('start-test-btn').innerText = 'Test in corso...';
+                    document.getElementById('start-test-btn').innerText = '🚀 Test Parallelo in Corso...';
                     document.getElementById('stop-test-btn').disabled = false;
-                    document.getElementById('status-bar').innerText = 'Test ripreso dopo ricaricamento pagina...';
+                    document.getElementById('max-workers').disabled = true;
+                    document.getElementById('status-bar').innerText = '⚡ Test parallelo ripreso dopo ricaricamento pagina...';
                     document.getElementById('resume-notice').style.display = 'block';
                     
                     // Riavvia il monitoraggio dei risultati
@@ -442,6 +478,9 @@ HTML_TEMPLATE = """
                     // Verifica se il test è recente (meno di 10 minuti)
                     if (Date.now() - testData.startTime < 600000) {
                         document.getElementById('proxy-list').value = testData.proxies.join('\\n');
+                        if (testData.maxWorkers) {
+                            document.getElementById('max-workers').value = testData.maxWorkers;
+                        }
                     }
                 }
                 
@@ -572,10 +611,15 @@ def index():
 def test_proxies_stream():
     session_id = request.headers.get('X-Session-ID') or session.get('session_id', str(uuid.uuid4()))
     proxy_list_str = request.form.get('proxies', '')
+    max_workers = int(request.form.get('max_workers', 20))
     proxies = [line.strip() for line in proxy_list_str.split('\n') if line.strip()]
 
     if not proxies:
         return Response("data: {\"error\": \"Nessun proxy fornito\"}\n\n", mimetype='text/event-stream')
+
+    # Limita il numero di worker per evitare sovraccarico
+    max_workers = min(max_workers, 50)
+    max_workers = max(max_workers, 1)
 
     # Registra il test attivo
     with active_tests_lock:
@@ -585,73 +629,93 @@ def test_proxies_stream():
             'last_heartbeat': datetime.now(),
             'total_proxies': len(proxies),
             'proxies': proxies,
-            'current_index': 0
+            'current_index': 0,
+            'completed_count': 0,
+            'max_workers': max_workers
         }
+
+    def test_proxy_wrapper(proxy_line):
+        """Wrapper per testare un singolo proxy"""
+        # Controlla se il test è ancora attivo
+        with active_tests_lock:
+            if session_id not in active_tests or not active_tests[session_id]['running']:
+                return None
+        
+        result = None
+        
+        # Test del proxy con gestione protocolli
+        if proxy_line.startswith(('socks5h://', 'socks5://')):
+            proxy_address = proxy_line.split('//', 1)[1]
+            result = test_single_proxy(proxy_line, 'socks5', proxy_address, session_id)
+        elif proxy_line.startswith(('http://', 'https://')):
+            result = test_single_proxy(proxy_line, 'http', proxy_line, session_id)
+        else:
+            # Prova prima come HTTP
+            result_http = test_single_proxy(proxy_line, 'http', proxy_line, session_id)
+            if result_http['status'] == 'SUCCESS':
+                result = result_http
+            elif result_http['status'] == 'STOPPED':
+                result = result_http
+            else:
+                # Se fallisce, prova come SOCKS5
+                result_socks = test_single_proxy(proxy_line, 'socks5', proxy_line, session_id)
+                if result_socks['status'] == 'SUCCESS':
+                    result = result_socks
+                elif result_socks['status'] == 'STOPPED':
+                    result = result_socks
+                else:
+                    result = result_http
+
+        if result:
+            result['proxy'] = proxy_line
+            
+            if result['status'] == 'SUCCESS':
+                protocol_used = result.get('protocol_used', 'sconosciuto')
+                proxy_to_save = proxy_line
+                if protocol_used == 'http' and not proxy_line.startswith(('http://', 'https://')):
+                    proxy_to_save = f"http://{proxy_line}"
+                elif protocol_used == 'socks5' and not proxy_line.startswith(('socks5://', 'socks5h://')):
+                    proxy_to_save = f"socks5://{proxy_line}"
+                result['proxy_to_save'] = proxy_to_save
+        
+        return result
 
     def generate_results():
         try:
-            for line in proxies:
-                # Controlla se il test è stato fermato
-                with active_tests_lock:
-                    if session_id not in active_tests or not active_tests[session_id]['running']:
-                        break
-
-                result = None
+            # Numero di thread paralleli
+            actual_workers = min(max_workers, len(proxies))
+            print(f"[{session_id[:8]}] Avvio test parallelo con {actual_workers} worker per {len(proxies)} proxy")
+            
+            with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+                # Invia tutti i proxy per il testing parallelo
+                future_to_proxy = {executor.submit(test_proxy_wrapper, proxy): proxy for proxy in proxies}
                 
-                # Test del proxy con gestione protocolli
-                if line.startswith(('socks5h://', 'socks5://')):
-                    proxy_address = line.split('//', 1)[1]
-                    result = test_single_proxy(line, 'socks5', proxy_address, session_id)
-                elif line.startswith(('http://', 'https://')):
-                    result = test_single_proxy(line, 'http', line, session_id)
-                else:
-                    # Prova prima come HTTP
-                    result_http = test_single_proxy(line, 'http', line, session_id)
-                    if result_http['status'] == 'SUCCESS':
-                        result = result_http
-                    elif result_http['status'] == 'STOPPED':
-                        result = result_http
-                    else:
-                        # Se fallisce, prova come SOCKS5
-                        result_socks = test_single_proxy(line, 'socks5', line, session_id)
-                        if result_socks['status'] == 'SUCCESS':
-                            result = result_socks
-                        elif result_socks['status'] == 'STOPPED':
-                            result = result_socks
-                        else:
-                            result = result_http
-
-                # Se il test è stato fermato, interrompi
-                if result['status'] == 'STOPPED':
-                    break
-
-                # Aggiorna l'indice corrente
-                with active_tests_lock:
-                    if session_id in active_tests:
-                        active_tests[session_id]['current_index'] += 1
-
-                data_to_send = result.copy()
-                data_to_send['proxy'] = line
-                
-                if result['status'] == 'SUCCESS':
-                    protocol_used = result.get('protocol_used', 'sconosciuto')
-                    proxy_to_save = line
-                    if protocol_used == 'http' and not line.startswith(('http://', 'https://')):
-                        proxy_to_save = f"http://{line}"
-                    elif protocol_used == 'socks5' and not line.startswith(('socks5://', 'socks5h://')):
-                        proxy_to_save = f"socks5://{line}"
-                    data_to_send['proxy_to_save'] = proxy_to_save
-
-                print(f"[{session_id[:8]}] Risultato per {line}: {data_to_send}")
-                
-                try:
-                    yield f"data: {json.dumps(data_to_send)}\n\n"
-                except GeneratorExit:
-                    print(f"[{session_id[:8]}] Client disconnesso durante il test")
-                    break
-                except Exception as e:
-                    print(f"[{session_id[:8]}] Errore invio dati: {e}")
-                    break
+                for future in as_completed(future_to_proxy):
+                    # Controlla se il test è stato fermato
+                    with active_tests_lock:
+                        if session_id not in active_tests or not active_tests[session_id]['running']:
+                            # Cancella tutti i future rimanenti
+                            for f in future_to_proxy:
+                                f.cancel()
+                            break
+                    
+                    result = future.result()
+                    if result and result['status'] != 'STOPPED':
+                        # Aggiorna il contatore
+                        with active_tests_lock:
+                            if session_id in active_tests:
+                                active_tests[session_id]['completed_count'] += 1
+                        
+                        print(f"[{session_id[:8]}] Risultato per {result['proxy']}: {result['status']}")
+                        
+                        try:
+                            yield f"data: {json.dumps(result)}\n\n"
+                        except GeneratorExit:
+                            print(f"[{session_id[:8]}] Client disconnesso durante il test")
+                            break
+                        except Exception as e:
+                            print(f"[{session_id[:8]}] Errore invio dati: {e}")
+                            break
         
         except GeneratorExit:
             print(f"[{session_id[:8]}] Generatore interrotto")
@@ -661,7 +725,7 @@ def test_proxies_stream():
                 if session_id in active_tests:
                     active_tests[session_id]['running'] = False
                     del active_tests[session_id]
-                    print(f"[{session_id[:8]}] Test pulito dopo disconnessione")
+                    print(f"[{session_id[:8]}] Test parallelo pulito dopo disconnessione")
     
     return Response(generate_results(), mimetype='text/event-stream')
 
@@ -676,69 +740,78 @@ def resume_test_monitoring():
             # La sessione esiste ed è attiva
             test_info = active_tests[session_id]
             proxies = test_info['proxies']
-            current_index = test_info['current_index']
+            completed_count = test_info.get('completed_count', 0)
+            max_workers = test_info.get('max_workers', 20)
             
             def generate_status():
-                yield f"data: {{\"status\": \"RESUMED\", \"message\": \"Sessione ripresa - continuando dal proxy {current_index + 1}/{len(proxies)}\"}}\n\n"
+                yield f"data: {{\"status\": \"RESUMED\", \"message\": \"Sessione parallela ripresa - {completed_count}/{len(proxies)} proxy già completati\"}}\n\n"
                 
-                # Continua dal punto in cui si era interrotto
-                for i in range(current_index, len(proxies)):
-                    # Controlla se il test è ancora attivo
-                    with active_tests_lock:
-                        if session_id not in active_tests or not active_tests[session_id]['running']:
-                            break
-                    
-                    line = proxies[i]
-                    result = None
-                    
-                    # Test del proxy con gestione protocolli
-                    if line.startswith(('socks5h://', 'socks5://')):
-                        proxy_address = line.split('//', 1)[1]
-                        result = test_single_proxy(line, 'socks5', proxy_address, session_id)
-                    elif line.startswith(('http://', 'https://')):
-                        result = test_single_proxy(line, 'http', line, session_id)
-                    else:
-                        # Prova prima come HTTP
-                        result_http = test_single_proxy(line, 'http', line, session_id)
-                        if result_http['status'] == 'SUCCESS':
-                            result = result_http
-                        elif result_http['status'] == 'STOPPED':
-                            result = result_http
+                # Continua il test parallelo per i proxy rimanenti
+                remaining_proxies = proxies[completed_count:]
+                if remaining_proxies:
+                    def test_proxy_wrapper(proxy_line):
+                        # Stesso wrapper del test principale
+                        with active_tests_lock:
+                            if session_id not in active_tests or not active_tests[session_id]['running']:
+                                return None
+                        
+                        result = None
+                        
+                        if proxy_line.startswith(('socks5h://', 'socks5://')):
+                            proxy_address = proxy_line.split('//', 1)[1]
+                            result = test_single_proxy(proxy_line, 'socks5', proxy_address, session_id)
+                        elif proxy_line.startswith(('http://', 'https://')):
+                            result = test_single_proxy(proxy_line, 'http', proxy_line, session_id)
                         else:
-                            # Se fallisce, prova come SOCKS5
-                            result_socks = test_single_proxy(line, 'socks5', line, session_id)
-                            if result_socks['status'] == 'SUCCESS':
-                                result = result_socks
-                            elif result_socks['status'] == 'STOPPED':
-                                result = result_socks
-                            else:
+                            result_http = test_single_proxy(proxy_line, 'http', proxy_line, session_id)
+                            if result_http['status'] == 'SUCCESS':
                                 result = result_http
+                            elif result_http['status'] == 'STOPPED':
+                                result = result_http
+                            else:
+                                result_socks = test_single_proxy(proxy_line, 'socks5', proxy_line, session_id)
+                                if result_socks['status'] == 'SUCCESS':
+                                    result = result_socks
+                                elif result_socks['status'] == 'STOPPED':
+                                    result = result_socks
+                                else:
+                                    result = result_http
 
-                    # Se il test è stato fermato, interrompi
-                    if result['status'] == 'STOPPED':
-                        break
+                        if result:
+                            result['proxy'] = proxy_line
+                            
+                            if result['status'] == 'SUCCESS':
+                                protocol_used = result.get('protocol_used', 'sconosciuto')
+                                proxy_to_save = proxy_line
+                                if protocol_used == 'http' and not proxy_line.startswith(('http://', 'https://')):
+                                    proxy_to_save = f"http://{proxy_line}"
+                                elif protocol_used == 'socks5' and not proxy_line.startswith(('socks5://', 'socks5h://')):
+                                    proxy_to_save = f"socks5://{proxy_line}"
+                                result['proxy_to_save'] = proxy_to_save
+                        
+                        return result
 
-                    # Aggiorna l'indice corrente
-                    with active_tests_lock:
-                        if session_id in active_tests:
-                            active_tests[session_id]['current_index'] = i + 1
+                    actual_workers = min(max_workers, len(remaining_proxies))
+                    with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+                        future_to_proxy = {executor.submit(test_proxy_wrapper, proxy): proxy for proxy in remaining_proxies}
+                        
+                        for future in as_completed(future_to_proxy):
+                            with active_tests_lock:
+                                if session_id not in active_tests or not active_tests[session_id]['running']:
+                                    for f in future_to_proxy:
+                                        f.cancel()
+                                    break
+                            
+                            result = future.result()
+                            if result and result['status'] != 'STOPPED':
+                                with active_tests_lock:
+                                    if session_id in active_tests:
+                                        active_tests[session_id]['completed_count'] += 1
 
-                    data_to_send = result.copy()
-                    data_to_send['proxy'] = line
-                    
-                    if result['status'] == 'SUCCESS':
-                        protocol_used = result.get('protocol_used', 'sconosciuto')
-                        proxy_to_save = line
-                        if protocol_used == 'http' and not line.startswith(('http://', 'https://')):
-                            proxy_to_save = f"http://{line}"
-                        elif protocol_used == 'socks5' and not line.startswith(('socks5://', 'socks5h://')):
-                            proxy_to_save = f"socks5://{line}"
-                        data_to_send['proxy_to_save'] = proxy_to_save
-
-                    try:
-                        yield f"data: {json.dumps(data_to_send)}\n\n"
-                    except GeneratorExit:
-                        break
+                                try:
+                                    yield f"data: {json.dumps(result)}\n\n"
+                                except GeneratorExit:
+                                    break
                 
                 # Pulisci il test al completamento
                 with active_tests_lock:
@@ -790,7 +863,7 @@ def stop_test():
         with active_tests_lock:
             if session_id in active_tests:
                 active_tests[session_id]['running'] = False
-                print(f"[{session_id[:8]}] Test fermato: {reason}")
+                print(f"[{session_id[:8]}] Test parallelo fermato: {reason}")
                 return {'status': 'stopped', 'session_id': session_id[:8], 'reason': reason}
     
     return {'status': 'session_not_found'}, 404
@@ -814,8 +887,9 @@ def check_session_status():
                 return {
                     'test_running': True, 
                     'session_id': session_id[:8],
-                    'current_index': test_info.get('current_index', 0),
-                    'total_proxies': test_info.get('total_proxies', 0)
+                    'completed_count': test_info.get('completed_count', 0),
+                    'total_proxies': test_info.get('total_proxies', 0),
+                    'max_workers': test_info.get('max_workers', 20)
                 }
     
     return {'test_running': False}
@@ -836,7 +910,8 @@ def get_status():
                 'start_time': info['start_time'].strftime('%H:%M:%S'),
                 'start_date': info['start_time'].strftime('%Y-%m-%d'),
                 'total_proxies': info['total_proxies'],
-                'current_index': info.get('current_index', 0),
+                'completed_count': info.get('completed_count', 0),
+                'max_workers': info.get('max_workers', 20),
                 'last_heartbeat': last_heartbeat.strftime('%H:%M:%S') if last_heartbeat else 'mai'
             })
     
@@ -844,10 +919,11 @@ def get_status():
         'active_tests': active_count,
         'tests': tests_info,
         'server_info': {
-            'version': '2.1',
+            'version': '2.2',
             'multi_user': True,
             'resume_support': True,
             'heartbeat_support': True,
+            'parallel_testing': True,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     }
@@ -860,7 +936,7 @@ def admin_panel():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Admin Panel - Proxy Tester</title>
+        <title>Admin Panel - Proxy Tester Parallelo</title>
         <style>
             body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
             .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
@@ -879,14 +955,16 @@ def admin_panel():
             .stopped { color: #dc3545; font-weight: bold; }
             .progress { font-size: 0.9em; color: #666; }
             .heartbeat { font-size: 0.8em; color: #888; }
+            .workers { font-size: 0.8em; color: #007bff; font-weight: bold; }
+            .parallel-badge { background: #4caf50; color: white; padding: 2px 6px; border-radius: 3px; font-size: 0.7em; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🔧 Admin Panel - Proxy Tester</h1>
+            <h1>🚀 Admin Panel - Proxy Tester Parallelo</h1>
             <div class="status-box">
                 <h3>Stato Server</h3>
-                <p><strong>Versione:</strong> 2.1 Multi-User con Resume e Heartbeat</p>
+                <p><strong>Versione:</strong> 2.2 Multi-User con Testing Parallelo <span class="parallel-badge">PARALLELO</span></p>
                 <p><strong>Sessioni Attive:</strong> <span id="active-count">-</span></p>
                 <p><strong>Ultimo Aggiornamento:</strong> <span id="last-update">-</span></p>
             </div>
@@ -904,6 +982,7 @@ def admin_panel():
                             <th>ID Sessione</th>
                             <th>Stato</th>
                             <th>Progresso</th>
+                            <th>Workers</th>
                             <th>Avviato</th>
                             <th>Data</th>
                             <th>Ultimo Heartbeat</th>
@@ -940,12 +1019,14 @@ def admin_panel():
                             const row = document.createElement('tr');
                             const statusClass = test.running ? 'running' : 'stopped';
                             const statusText = test.running ? '🟢 Attivo' : '🔴 Fermato';
-                            const progress = `${test.current_index}/${test.total_proxies}`;
+                            const progress = `${test.completed_count}/${test.total_proxies}`;
+                            const workers = test.max_workers || 'N/A';
                             
                             row.innerHTML = `
                                 <td><code>${test.session_id}</code></td>
                                 <td><span class="${statusClass}">${statusText}</span></td>
                                 <td><span class="progress">${progress}</span></td>
+                                <td><span class="workers">${workers} thread</span></td>
                                 <td>${test.start_time}</td>
                                 <td>${test.start_date}</td>
                                 <td><span class="heartbeat">${test.last_heartbeat}</span></td>
@@ -976,11 +1057,12 @@ def admin_panel():
     """)
 
 if __name__ == '__main__':
-    print("Avvio del server Proxy Tester Web Multi-Utente con Resume e Heartbeat...")
+    print("🚀 Avvio del server Proxy Tester Web Multi-Utente con Testing Parallelo...")
     print("Apri http://127.0.0.1:7860 nel tuo browser.")
     print("Admin panel: http://127.0.0.1:7860/admin")
     print("Status API: http://127.0.0.1:7860/status")
     print(f"Admin password: {os.getenv('ADMIN_PASSWORD', 'admin123')}")
+    print("✨ Novità: Testing parallelo per velocità massima!")
     
     # Avvia il timer di pulizia automatica
     start_cleanup_timer()
