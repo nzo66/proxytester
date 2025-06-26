@@ -2,12 +2,18 @@ import subprocess
 import json
 import uuid
 import threading
+import os
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, Response, render_template_string, session
+from flask import Flask, request, Response, render_template_string, session, jsonify
 from datetime import datetime
+from functools import wraps
+from dotenv import load_dotenv
+
+# Carica variabili d'ambiente
+load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-change-this-in-production'  # Cambia in produzione
+app.secret_key = os.getenv('SECRET_KEY', 'fallback-secret-key-change-this')
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 
 # Pool di thread per gestire test simultanei
@@ -17,7 +23,24 @@ executor = ThreadPoolExecutor(max_workers=10)
 active_tests = {}
 active_tests_lock = threading.Lock()
 
-# --- HTML Template (stesso di prima) ---
+# Decorator per autenticazione
+def require_auth(f):
+    """Decorator per richiedere autenticazione HTTP Basic"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth = request.authorization
+        admin_password = os.getenv('ADMIN_PASSWORD', 'admin123')
+        
+        if not auth or auth.username != 'admin' or auth.password != admin_password:
+            return jsonify({
+                'error': 'Autenticazione richiesta',
+                'message': 'Usa username: admin e la password configurata'
+            }), 401, {'WWW-Authenticate': 'Basic realm="Admin Area"'}
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
+# --- HTML Template ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="it">
@@ -389,26 +412,154 @@ def stop_test():
     return {'status': 'stopped'}
 
 @app.route('/status')
+@require_auth
 def get_status():
-    """Endpoint per ottenere lo stato dei test attivi"""
+    """Endpoint protetto per ottenere lo stato dei test attivi"""
     with active_tests_lock:
         active_count = len(active_tests)
         tests_info = []
         for sid, info in active_tests.items():
             tests_info.append({
                 'session_id': sid[:8],
+                'full_session_id': sid,
                 'running': info['running'],
                 'start_time': info['start_time'].strftime('%H:%M:%S'),
+                'start_date': info['start_time'].strftime('%Y-%m-%d'),
                 'total_proxies': info['total_proxies']
             })
     
     return {
         'active_tests': active_count,
-        'tests': tests_info
+        'tests': tests_info,
+        'server_info': {
+            'version': '2.0',
+            'multi_user': True,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
     }
+
+@app.route('/admin')
+@require_auth
+def admin_panel():
+    """Pannello admin protetto"""
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Admin Panel - Proxy Tester</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+            .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            h1 { color: #2c5aa0; }
+            .status-box { background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 10px 0; }
+            .session-box { background: #f8f9fa; padding: 10px; border-radius: 5px; margin: 5px 0; border-left: 4px solid #28a745; }
+            .session-box.stopped { border-left-color: #dc3545; }
+            button { padding: 10px 20px; background: #2c5aa0; color: white; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }
+            button:hover { background: #1e3d6f; }
+            .refresh-btn { background: #28a745; }
+            .json-btn { background: #17a2b8; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+            th { background-color: #f2f2f2; }
+            .running { color: #28a745; font-weight: bold; }
+            .stopped { color: #dc3545; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🔧 Admin Panel - Proxy Tester</h1>
+            <div class="status-box">
+                <h3>Stato Server</h3>
+                <p><strong>Versione:</strong> 2.0 Multi-User</p>
+                <p><strong>Sessioni Attive:</strong> <span id="active-count">-</span></p>
+                <p><strong>Ultimo Aggiornamento:</strong> <span id="last-update">-</span></p>
+            </div>
+            
+            <button class="refresh-btn" onclick="loadStatus()">🔄 Aggiorna Stato</button>
+            <button class="json-btn" onclick="window.open('/status', '_blank')">📊 Vedi JSON Status</button>
+            <button onclick="window.open('/', '_blank')">🏠 Vai all'App</button>
+            
+            <div id="sessions-container">
+                <h3>Sessioni Attive</h3>
+                <div id="sessions-list"></div>
+                <table id="sessions-table" style="display:none;">
+                    <thead>
+                        <tr>
+                            <th>ID Sessione</th>
+                            <th>Stato</th>
+                            <th>Avviato</th>
+                            <th>Data</th>
+                            <th>Proxy Totali</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sessions-tbody">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <script>
+            function loadStatus() {
+                fetch('/status')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('active-count').textContent = data.active_tests;
+                    document.getElementById('last-update').textContent = new Date().toLocaleString();
+                    
+                    const sessionsList = document.getElementById('sessions-list');
+                    const sessionsTable = document.getElementById('sessions-table');
+                    const sessionsTableBody = document.getElementById('sessions-tbody');
+                    
+                    if (data.tests.length > 0) {
+                        // Mostra tabella
+                        sessionsList.style.display = 'none';
+                        sessionsTable.style.display = 'table';
+                        
+                        // Pulisci tabella
+                        sessionsTableBody.innerHTML = '';
+                        
+                        // Popola tabella
+                        data.tests.forEach(test => {
+                            const row = document.createElement('tr');
+                            const statusClass = test.running ? 'running' : 'stopped';
+                            const statusText = test.running ? '🟢 Attivo' : '🔴 Fermato';
+                            
+                            row.innerHTML = `
+                                <td><code>${test.session_id}</code></td>
+                                <td><span class="${statusClass}">${statusText}</span></td>
+                                <td>${test.start_time}</td>
+                                <td>${test.start_date}</td>
+                                <td>${test.total_proxies}</td>
+                            `;
+                            sessionsTableBody.appendChild(row);
+                        });
+                    } else {
+                        // Mostra messaggio
+                        sessionsTable.style.display = 'none';
+                        sessionsList.style.display = 'block';
+                        sessionsList.innerHTML = '<p>🎉 Nessuna sessione attiva</p>';
+                    }
+                })
+                .catch(error => {
+                    console.error('Errore:', error);
+                    alert('Errore nel caricamento dello stato. Verifica le credenziali.');
+                });
+            }
+            
+            // Carica stato iniziale
+            loadStatus();
+            
+            // Auto-refresh ogni 30 secondi
+            setInterval(loadStatus, 30000);
+        </script>
+    </body>
+    </html>
+    """)
 
 if __name__ == '__main__':
     print("Avvio del server Proxy Tester Web Multi-Utente...")
     print("Apri http://127.0.0.1:7860 nel tuo browser.")
-    print("Endpoint status: http://127.0.0.1:7860/status")
+    print("Admin panel: http://127.0.0.1:7860/admin")
+    print("Status API: http://127.0.0.1:7860/status")
+    print(f"Admin password: {os.getenv('ADMIN_PASSWORD', 'admin123')}")
     app.run(host='0.0.0.0', port=7860, debug=False, threaded=True)
