@@ -31,7 +31,6 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copia codice applicazione e file .env
 COPY app.py .
-COPY .env .
 
 # Cambia ownership dei file
 RUN chown -R appuser:appuser /app
