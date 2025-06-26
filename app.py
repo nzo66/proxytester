@@ -105,7 +105,35 @@ HTML_TEMPLATE = """
     <script>
         let abortController = null;
         const sessionId = '{{ session_id }}';
+        let isPageUnloading = false;
+        let heartbeatInterval = null;
         let isTestResumed = false;
+
+        // Heartbeat per verificare la connessione
+        function startHeartbeat() {
+            heartbeatInterval = setInterval(() => {
+                if (document.getElementById('start-test-btn').disabled && !isPageUnloading) {
+                    fetch('/heartbeat', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Session-ID': sessionId
+                        },
+                        body: JSON.stringify({session_id: sessionId})
+                    }).catch(error => {
+                        console.log('Heartbeat failed:', error);
+                    });
+                }
+            }, 30000); // Ogni 30 secondi
+        }
+
+        // Ferma il heartbeat
+        function stopHeartbeat() {
+            if (heartbeatInterval) {
+                clearInterval(heartbeatInterval);
+                heartbeatInterval = null;
+            }
+        }
 
         function startTest() {
             const proxyList = document.getElementById('proxy-list').value;
@@ -134,6 +162,9 @@ HTML_TEMPLATE = """
             testButton.innerText = 'Test in corso...';
             document.getElementById('stop-test-btn').disabled = false;
             
+            // Avvia heartbeat
+            startHeartbeat();
+            
             let testedCount = 0;
             let workingCount = 0;
             let failedCount = 0;
@@ -161,7 +192,8 @@ HTML_TEMPLATE = """
                             testButton.innerText = 'Avvia Test';
                             document.getElementById('stop-test-btn').disabled = true;
                             statusBar.innerText = `Test completato: ${testedCount} / ${proxies.length}`;
-                            // Rimuovi lo stato dal localStorage al completamento
+                            // Ferma heartbeat e rimuovi stato dal localStorage
+                            stopHeartbeat();
                             localStorage.removeItem('activeTest');
                             return;
                         }
@@ -203,13 +235,17 @@ HTML_TEMPLATE = """
                 testButton.disabled = false;
                 testButton.innerText = 'Avvia Test';
                 document.getElementById('stop-test-btn').disabled = true;
-                // Rimuovi lo stato dal localStorage in caso di errore
+                // Ferma heartbeat e rimuovi stato dal localStorage
+                stopHeartbeat();
                 localStorage.removeItem('activeTest');
             });
         }
 
         function stopTest() {
             if (abortController) abortController.abort();
+            
+            // Ferma heartbeat
+            stopHeartbeat();
             
             // Invia richiesta di stop al server
             fetch('/stop', {
@@ -234,6 +270,9 @@ HTML_TEMPLATE = """
             if (abortController) abortController.abort();
             abortController = new AbortController();
             
+            // Avvia heartbeat per il test ripreso
+            startHeartbeat();
+            
             fetch('/test/resume', {
                 method: 'POST',
                 headers: {
@@ -256,6 +295,7 @@ HTML_TEMPLATE = """
                             document.getElementById('start-test-btn').innerText = 'Avvia Test';
                             document.getElementById('stop-test-btn').disabled = true;
                             document.getElementById('status-bar').innerText = 'Test completato';
+                            stopHeartbeat();
                             localStorage.removeItem('activeTest');
                             return;
                         }
@@ -299,6 +339,7 @@ HTML_TEMPLATE = """
                 document.getElementById('start-test-btn').innerText = 'Avvia Test';
                 document.getElementById('stop-test-btn').disabled = true;
                 document.getElementById('status-bar').innerText = 'Errore nel riprendere il test';
+                stopHeartbeat();
             });
         }
 
@@ -316,27 +357,79 @@ HTML_TEMPLATE = """
             URL.revokeObjectURL(url);
         }
 
-        // Gestione migliorata del reload della pagina
+        // Gestione migliorata degli eventi di chiusura
         window.addEventListener('beforeunload', (event) => {
-            // Solo per chiusura definitiva, non per reload
-            if (performance.navigation && performance.navigation.type !== performance.navigation.TYPE_RELOAD) {
-                if (abortController) {
-                    abortController.abort();
+            isPageUnloading = true;
+            
+            // Ferma il heartbeat
+            stopHeartbeat();
+            
+            // Interrompi la connessione fetch
+            if (abortController) {
+                abortController.abort();
+            }
+            
+            // Invia richiesta di stop al server
+            if (document.getElementById('start-test-btn').disabled) {
+                const data = JSON.stringify({
+                    session_id: sessionId,
+                    reason: 'browser_closing'
+                });
+                
+                if (navigator.sendBeacon) {
+                    navigator.sendBeacon('/stop', data);
                 }
                 
-                if (document.getElementById('start-test-btn').disabled) {
-                    const data = JSON.stringify({session_id: sessionId});
-                    
-                    if (navigator.sendBeacon) {
-                        navigator.sendBeacon('/stop', data);
-                    }
-                    
+                // Solo per reload, non per chiusura completa
+                if (performance.navigation && performance.navigation.type === performance.navigation.TYPE_RELOAD) {
                     event.preventDefault();
-                    event.returnValue = 'Un test è in corso. Sei sicuro di voler uscire?';
+                    event.returnValue = 'Un test è in corso. Ricaricando la pagina potresti perdere alcuni risultati.';
                     return event.returnValue;
                 }
             }
         });
+
+        // Gestione visibilità pagina (quando si cambia tab o si minimizza)
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                console.log('Pagina nascosta');
+            } else {
+                console.log('Pagina visibile');
+                // Ricontrolla lo stato quando la pagina torna visibile
+                if (!isPageUnloading) {
+                    checkSessionStatus();
+                }
+            }
+        });
+
+        function checkSessionStatus() {
+            fetch('/status/check', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Session-ID': sessionId
+                },
+                body: JSON.stringify({session_id: sessionId})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.test_running && !document.getElementById('start-test-btn').disabled) {
+                    // Ripristina l'interfaccia per il test in corso
+                    document.getElementById('start-test-btn').disabled = true;
+                    document.getElementById('start-test-btn').innerText = 'Test in corso...';
+                    document.getElementById('stop-test-btn').disabled = false;
+                    document.getElementById('status-bar').innerText = 'Test ripreso dopo ricaricamento pagina...';
+                    document.getElementById('resume-notice').style.display = 'block';
+                    
+                    // Riavvia il monitoraggio dei risultati
+                    isTestResumed = true;
+                    resumeTestMonitoring();
+                }
+            })
+            .catch(error => {
+                console.log('Nessun test attivo da riprendere');
+            });
+        }
 
         // Controlla se c'è un test in corso al caricamento della pagina
         window.addEventListener('load', function() {
@@ -353,32 +446,7 @@ HTML_TEMPLATE = """
                 }
                 
                 // Poi controlla lo stato sul server
-                fetch('/status/check', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Session-ID': sessionId
-                    },
-                    body: JSON.stringify({session_id: sessionId})
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.test_running) {
-                        // Ripristina l'interfaccia per il test in corso
-                        document.getElementById('start-test-btn').disabled = true;
-                        document.getElementById('start-test-btn').innerText = 'Test in corso...';
-                        document.getElementById('stop-test-btn').disabled = false;
-                        document.getElementById('status-bar').innerText = 'Test ripreso dopo ricaricamento pagina...';
-                        document.getElementById('resume-notice').style.display = 'block';
-                        
-                        // Riavvia il monitoraggio dei risultati
-                        isTestResumed = true;
-                        resumeTestMonitoring();
-                    }
-                })
-                .catch(error => {
-                    console.log('Nessun test attivo da riprendere');
-                });
+                checkSessionStatus();
             }, 500);
         });
     </script>
@@ -463,19 +531,26 @@ def test_single_proxy(proxy_line, proxy_type, address_for_curl, session_id):
         return {'status': 'FAIL', 'details': f'Errore esecuzione script: {e}', 'is_protocol_error': False}
 
 def cleanup_abandoned_sessions():
-    """Pulisce le sessioni abbandonate dopo 10 minuti (aumentato per gestire i reload)"""
+    """Pulisce le sessioni abbandonate - versione migliorata"""
     current_time = datetime.now()
     abandoned_sessions = []
     
     with active_tests_lock:
         for session_id, info in active_tests.items():
-            if (current_time - info['start_time']).total_seconds() > 600:  # 10 minuti
+            # Controlla sia il tempo di inizio che l'ultimo heartbeat
+            last_activity = info.get('last_heartbeat', info['start_time'])
+            time_since_activity = (current_time - last_activity).total_seconds()
+            
+            # Sessione abbandonata se:
+            # - Più di 2 minuti senza heartbeat E test in corso
+            # - Più di 10 minuti dall'inizio
+            if (time_since_activity > 120 and info['running']) or time_since_activity > 600:
                 abandoned_sessions.append(session_id)
         
         for session_id in abandoned_sessions:
+            print(f"[{session_id[:8]}] Sessione abbandonata - ultimo heartbeat: {active_tests[session_id].get('last_heartbeat', 'mai')}")
             active_tests[session_id]['running'] = False
             del active_tests[session_id]
-            print(f"[{session_id[:8]}] Sessione abbandonata pulita automaticamente")
 
 # Timer per pulizia automatica delle sessioni abbandonate
 def start_cleanup_timer():
@@ -507,6 +582,7 @@ def test_proxies_stream():
         active_tests[session_id] = {
             'running': True,
             'start_time': datetime.now(),
+            'last_heartbeat': datetime.now(),
             'total_proxies': len(proxies),
             'proxies': proxies,
             'current_index': 0
@@ -674,6 +750,27 @@ def resume_test_monitoring():
     
     return {'error': 'Sessione non trovata o non attiva'}, 404
 
+@app.route('/heartbeat', methods=['POST'])
+def heartbeat():
+    """Endpoint per verificare che il client sia ancora connesso"""
+    try:
+        data = request.get_json(silent=True)
+        session_id = data.get('session_id') if data else None
+    except:
+        session_id = None
+    
+    if not session_id:
+        session_id = request.headers.get('X-Session-ID')
+    
+    if session_id:
+        with active_tests_lock:
+            if session_id in active_tests:
+                # Aggiorna il timestamp dell'ultima attività
+                active_tests[session_id]['last_heartbeat'] = datetime.now()
+                return {'status': 'alive', 'session_id': session_id[:8]}
+    
+    return {'status': 'session_not_found'}, 404
+
 @app.route('/stop', methods=['POST'])
 def stop_test():
     """Endpoint migliorato per fermare un test in corso"""
@@ -681,8 +778,10 @@ def stop_test():
         # Prova a leggere JSON
         data = request.get_json(silent=True)
         session_id = data.get('session_id') if data else None
+        reason = data.get('reason', 'user_request') if data else 'user_request'
     except:
         session_id = None
+        reason = 'user_request'
     
     if not session_id:
         session_id = request.headers.get('X-Session-ID') or session.get('session_id')
@@ -691,8 +790,8 @@ def stop_test():
         with active_tests_lock:
             if session_id in active_tests:
                 active_tests[session_id]['running'] = False
-                print(f"[{session_id[:8]}] Test fermato dall'utente")
-                return {'status': 'stopped', 'session_id': session_id[:8]}
+                print(f"[{session_id[:8]}] Test fermato: {reason}")
+                return {'status': 'stopped', 'session_id': session_id[:8], 'reason': reason}
     
     return {'status': 'session_not_found'}, 404
 
@@ -729,6 +828,7 @@ def get_status():
         active_count = len(active_tests)
         tests_info = []
         for sid, info in active_tests.items():
+            last_heartbeat = info.get('last_heartbeat')
             tests_info.append({
                 'session_id': sid[:8],
                 'full_session_id': sid,
@@ -736,7 +836,8 @@ def get_status():
                 'start_time': info['start_time'].strftime('%H:%M:%S'),
                 'start_date': info['start_time'].strftime('%Y-%m-%d'),
                 'total_proxies': info['total_proxies'],
-                'current_index': info.get('current_index', 0)
+                'current_index': info.get('current_index', 0),
+                'last_heartbeat': last_heartbeat.strftime('%H:%M:%S') if last_heartbeat else 'mai'
             })
     
     return {
@@ -746,6 +847,7 @@ def get_status():
             'version': '2.1',
             'multi_user': True,
             'resume_support': True,
+            'heartbeat_support': True,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     }
@@ -776,6 +878,7 @@ def admin_panel():
             .running { color: #28a745; font-weight: bold; }
             .stopped { color: #dc3545; font-weight: bold; }
             .progress { font-size: 0.9em; color: #666; }
+            .heartbeat { font-size: 0.8em; color: #888; }
         </style>
     </head>
     <body>
@@ -783,7 +886,7 @@ def admin_panel():
             <h1>🔧 Admin Panel - Proxy Tester</h1>
             <div class="status-box">
                 <h3>Stato Server</h3>
-                <p><strong>Versione:</strong> 2.1 Multi-User con Resume</p>
+                <p><strong>Versione:</strong> 2.1 Multi-User con Resume e Heartbeat</p>
                 <p><strong>Sessioni Attive:</strong> <span id="active-count">-</span></p>
                 <p><strong>Ultimo Aggiornamento:</strong> <span id="last-update">-</span></p>
             </div>
@@ -803,6 +906,7 @@ def admin_panel():
                             <th>Progresso</th>
                             <th>Avviato</th>
                             <th>Data</th>
+                            <th>Ultimo Heartbeat</th>
                         </tr>
                     </thead>
                     <tbody id="sessions-tbody">
@@ -844,6 +948,7 @@ def admin_panel():
                                 <td><span class="progress">${progress}</span></td>
                                 <td>${test.start_time}</td>
                                 <td>${test.start_date}</td>
+                                <td><span class="heartbeat">${test.last_heartbeat}</span></td>
                             `;
                             sessionsTableBody.appendChild(row);
                         });
@@ -871,7 +976,7 @@ def admin_panel():
     """)
 
 if __name__ == '__main__':
-    print("Avvio del server Proxy Tester Web Multi-Utente con Resume...")
+    print("Avvio del server Proxy Tester Web Multi-Utente con Resume e Heartbeat...")
     print("Apri http://127.0.0.1:7860 nel tuo browser.")
     print("Admin panel: http://127.0.0.1:7860/admin")
     print("Status API: http://127.0.0.1:7860/status")
