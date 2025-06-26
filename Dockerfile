@@ -29,8 +29,9 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Copia codice applicazione
+# Copia codice applicazione e file .env
 COPY app.py .
+COPY .env .
 
 # Cambia ownership dei file
 RUN chown -R appuser:appuser /app
@@ -39,5 +40,5 @@ USER appuser
 
 EXPOSE 7860
 
-# Usa Gunicorn invece del server Flask di sviluppo
-CMD ["gunicorn", "--bind", "0.0.0.0:7860", "--workers", "4", "--threads", "2", "--timeout", "120", "app:app"]
+# Usa Gunicorn per produzione
+CMD ["gunicorn", "--bind", "0.0.0.0:7860", "--workers", "4", "--threads", "2", "--timeout", "120", "--worker-class", "gthread", "app:app"]
