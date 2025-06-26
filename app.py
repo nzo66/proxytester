@@ -1,11 +1,23 @@
 import subprocess
 import json
-from flask import Flask, request, Response, render_template_string
+import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from flask import Flask, request, Response, render_template_string, session
+from datetime import datetime
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 16 MB, puoi aumentare se serve
+app.secret_key = 'your-secret-key-change-this-in-production'  # Cambia in produzione
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 
-# --- HTML, CSS, JS for the Web Interface ---
+# Pool di thread per gestire test simultanei
+executor = ThreadPoolExecutor(max_workers=10)
+
+# Dizionario thread-safe per tracciare i test attivi
+active_tests = {}
+active_tests_lock = threading.Lock()
+
+# --- HTML Template (stesso di prima) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="it">
@@ -33,15 +45,19 @@ HTML_TEMPLATE = """
         .success { color: #28a745; }
         .failure { color: #dc3545; }
         .protocol { font-size: 0.8em; color: #666; background-color: #e9ecef; padding: 2px 5px; border-radius: 3px; margin-left: 5px; }
+        .session-info { background: #e3f2fd; padding: 10px; border-radius: 5px; margin-bottom: 20px; font-size: 14px; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🌐 Web Proxy Tester</h1>
+        <div class="session-info">
+            <strong>ID Sessione:</strong> <span id="session-id">{{ session_id }}</span> | 
+            <strong>Avviato:</strong> <span id="session-time">{{ session_time }}</span>
+        </div>
         <p>Incolla la tua lista di proxy (uno per riga) nel box sottostante e avvia il test.</p>
         <textarea id="proxy-list" placeholder="1.2.3.4:8080\nsocks5://user:pass@5.6.7.8:1080\n..."></textarea>
         <button id="start-test-btn" class="btn" onclick="startTest()">Avvia Test</button>
-        <!-- Sotto il bottone Avvia Test -->
         <button id="download-btn" class="btn" style="background:#28a745;margin-top:10px;" onclick="downloadWorkingProxies()" disabled>Scarica Proxy Funzionanti</button>
         <button id="stop-test-btn" class="btn" style="background:#dc3545;margin-top:10px;" onclick="stopTest()" disabled>Stop Test</button>
         
@@ -61,6 +77,7 @@ HTML_TEMPLATE = """
 
     <script>
         let abortController = null;
+        const sessionId = '{{ session_id }}';
 
         function startTest() {
             const proxyList = document.getElementById('proxy-list').value;
@@ -88,13 +105,15 @@ HTML_TEMPLATE = """
 
             statusBar.innerText = `Test in corso... 0 / ${proxies.length}`;
 
-            // Annulla eventuale test precedente
             if (abortController) abortController.abort();
             abortController = new AbortController();
 
             fetch('/test', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-Session-ID': sessionId
+                },
                 body: 'proxies=' + encodeURIComponent(proxyList),
                 signal: abortController.signal
             }).then(response => {
@@ -106,6 +125,7 @@ HTML_TEMPLATE = """
                             testButton.disabled = false;
                             testButton.innerText = 'Avvia Test';
                             document.getElementById('stop-test-btn').disabled = true;
+                            statusBar.innerText = `Test completato: ${testedCount} / ${proxies.length}`;
                             return;
                         }
                         buffer += new TextDecoder().decode(value, {stream:true});
@@ -114,7 +134,6 @@ HTML_TEMPLATE = """
                         for (let part of parts) {
                             if (part.startsWith('data: ')) {
                                 const data = JSON.parse(part.slice(6));
-                                // ...gestione come prima...
                                 testedCount++;
                                 statusBar.innerText = `Test in corso... ${testedCount} / ${proxies.length}`;
                                 if (data.status === 'SUCCESS') {
@@ -139,11 +158,30 @@ HTML_TEMPLATE = """
                     });
                 }
                 read();
+            }).catch(error => {
+                if (error.name !== 'AbortError') {
+                    console.error('Errore durante il test:', error);
+                    statusBar.innerText = 'Errore durante il test';
+                }
+                testButton.disabled = false;
+                testButton.innerText = 'Avvia Test';
+                document.getElementById('stop-test-btn').disabled = true;
             });
         }
 
         function stopTest() {
             if (abortController) abortController.abort();
+            
+            // Invia richiesta di stop al server
+            fetch('/stop', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Session-ID': sessionId
+                },
+                body: JSON.stringify({session_id: sessionId})
+            });
+
             document.getElementById('start-test-btn').disabled = false;
             document.getElementById('start-test-btn').innerText = 'Avvia Test';
             document.getElementById('stop-test-btn').disabled = true;
@@ -157,14 +195,13 @@ HTML_TEMPLATE = """
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'proxy_funzionanti.txt';
+            a.download = `proxy_funzionanti_${sessionId.substring(0,8)}.txt`;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
         }
 
-        // Annulla il test se la pagina viene ricaricata o chiusa
         window.addEventListener('beforeunload', () => {
             if (abortController) abortController.abort();
         });
@@ -173,11 +210,17 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- Backend Logic (adapted from test.py) ---
+# --- Backend Logic ---
 URL_TO_TEST = 'https://new.newkso.ru/wind/'
 
-def test_single_proxy(proxy_line, proxy_type, address_for_curl):
+def test_single_proxy(proxy_line, proxy_type, address_for_curl, session_id):
+    """Test thread-safe per singolo proxy"""
     try:
+        # Controlla se il test è stato fermato
+        with active_tests_lock:
+            if session_id not in active_tests or not active_tests[session_id]['running']:
+                return {'status': 'STOPPED', 'details': 'Test fermato dall\'utente', 'is_protocol_error': False}
+
         # Primo test: sito principale
         cmd = ['curl', '-k', '--max-time', '10', '--silent', '--show-error', '--connect-timeout', '7', URL_TO_TEST]
         if proxy_type == 'socks5':
@@ -185,22 +228,30 @@ def test_single_proxy(proxy_line, proxy_type, address_for_curl):
         elif proxy_type == 'http':
             cmd.extend(['--proxy', address_for_curl])
         else:
-            return {'status': 'FAIL', 'details': f'Tipo di proxy non supportato internamente: {proxy_type}', 'is_protocol_error': False}
+            return {'status': 'FAIL', 'details': f'Tipo di proxy non supportato: {proxy_type}', 'is_protocol_error': False}
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         
+        # Controlla di nuovo se fermato dopo il primo comando
+        with active_tests_lock:
+            if session_id not in active_tests or not active_tests[session_id]['running']:
+                return {'status': 'STOPPED', 'details': 'Test fermato dall\'utente', 'is_protocol_error': False}
+        
         if result.returncode != 0:
             error_msg = result.stderr.strip().lower()
-            protocol_error_keywords = ["unsupported proxy scheme", "malformed", "proxy connect command failed", "received http/0.9 when not allowed", "proxy handshake", "ssl connect error", "connect tunnel failed"]
+            protocol_error_keywords = ["unsupported proxy scheme", "malformed", "proxy connect command failed", 
+                                     "received http/0.9 when not allowed", "proxy handshake", "ssl connect error", 
+                                     "connect tunnel failed"]
             if any(keyword in error_msg for keyword in protocol_error_keywords):
                 return {'status': 'FAIL', 'details': f'Protocollo {proxy_type} errato o handshake fallito', 'is_protocol_error': True}
-            if "timed out" in error_msg: return {'status': 'FAIL', 'details': 'Timeout (10s)', 'is_protocol_error': False}
+            if "timed out" in error_msg: 
+                return {'status': 'FAIL', 'details': 'Timeout (10s)', 'is_protocol_error': False}
             details = result.stderr.strip() or f'curl exit code {result.returncode}'
             return {'status': 'FAIL', 'details': details, 'is_protocol_error': False}
         else:
-            output_lower = result.stdout.lower();
+            output_lower = result.stdout.lower()
             if '404' in output_lower or 'error' in output_lower:
-                return {'status': 'FAIL', 'details': 'Risposta HTTP 404 o errore nel contenuto', 'is_protocol_error': False, 'protocol_used': proxy_type}
+                return {'status': 'FAIL', 'details': 'Risposta HTTP 404 o errore nel contenuto', 'is_protocol_error': False}
         
         # Secondo test: vavoo.to
         VAVOO_URL = 'https://vavoo.to/play/1534161807/index.m3u8'
@@ -215,13 +266,21 @@ def test_single_proxy(proxy_line, proxy_type, address_for_curl):
             cmd2.extend(['--socks5-hostname', address_for_curl])
         elif proxy_type == 'http':
             cmd2.extend(['--proxy', address_for_curl])
+        
         result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=15)
+        
+        # Controlla se fermato dopo il secondo comando
+        with active_tests_lock:
+            if session_id not in active_tests or not active_tests[session_id]['running']:
+                return {'status': 'STOPPED', 'details': 'Test fermato dall\'utente', 'is_protocol_error': False}
+        
         if result2.returncode != 0:
             return {'status': 'FAIL', 'details': 'Errore su vavoo.to', 'is_protocol_error': False}
         if result2.stdout.strip() == '{"error":"Not found"}':
             return {'status': 'FAIL', 'details': 'Risposta vavoo.to: Not found', 'is_protocol_error': False}
         
         return {'status': 'SUCCESS', 'details': 'Connessione riuscita', 'is_protocol_error': False, 'protocol_used': proxy_type}
+    
     except subprocess.TimeoutExpired:
         return {'status': 'FAIL', 'details': 'Timeout script (15s)', 'is_protocol_error': False}
     except Exception as e:
@@ -229,54 +288,127 @@ def test_single_proxy(proxy_line, proxy_type, address_for_curl):
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    # Crea una sessione unica per ogni utente
+    if 'session_id' not in session:
+        session['session_id'] = str(uuid.uuid4())
+        session['session_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    return render_template_string(HTML_TEMPLATE, 
+                                session_id=session['session_id'],
+                                session_time=session['session_time'])
 
 @app.route('/test', methods=['POST'])
 def test_proxies_stream():
+    session_id = request.headers.get('X-Session-ID') or session.get('session_id', str(uuid.uuid4()))
     proxy_list_str = request.form.get('proxies', '')
     proxies = [line.strip() for line in proxy_list_str.split('\n') if line.strip()]
 
+    # Registra il test attivo
+    with active_tests_lock:
+        active_tests[session_id] = {
+            'running': True,
+            'start_time': datetime.now(),
+            'total_proxies': len(proxies)
+        }
+
     def generate_results():
-        for line in proxies:
-            result = None
-            # Se l'utente specifica il protocollo, usa quello
-            if line.startswith(('socks5h://', 'socks5://')):
-                proxy_address = line.split('//', 1)[1]
-                result = test_single_proxy(line, 'socks5', proxy_address)
-            elif line.startswith(('http://', 'https://')):
-                result = test_single_proxy(line, 'http', line)
-            else:
-                # Prova prima come HTTP
-                result_http = test_single_proxy(line, 'http', line)
-                if result_http['status'] == 'SUCCESS':
-                    result = result_http
+        try:
+            for line in proxies:
+                # Controlla se il test è stato fermato
+                with active_tests_lock:
+                    if session_id not in active_tests or not active_tests[session_id]['running']:
+                        break
+
+                result = None
+                
+                # Test del proxy con gestione protocolli
+                if line.startswith(('socks5h://', 'socks5://')):
+                    proxy_address = line.split('//', 1)[1]
+                    result = test_single_proxy(line, 'socks5', proxy_address, session_id)
+                elif line.startswith(('http://', 'https://')):
+                    result = test_single_proxy(line, 'http', line, session_id)
                 else:
-                    # Se fallisce, prova come SOCKS5
-                    result_socks = test_single_proxy(line, 'socks5', line)
-                    if result_socks['status'] == 'SUCCESS':
-                        result = result_socks
-                    else:
-                        # Se entrambi falliscono, mostra il risultato HTTP (più informativo)
+                    # Prova prima come HTTP
+                    result_http = test_single_proxy(line, 'http', line, session_id)
+                    if result_http['status'] == 'SUCCESS':
                         result = result_http
+                    elif result_http['status'] == 'STOPPED':
+                        result = result_http
+                    else:
+                        # Se fallisce, prova come SOCKS5
+                        result_socks = test_single_proxy(line, 'socks5', line, session_id)
+                        if result_socks['status'] == 'SUCCESS':
+                            result = result_socks
+                        elif result_socks['status'] == 'STOPPED':
+                            result = result_socks
+                        else:
+                            result = result_http
 
-            data_to_send = result.copy()
-            data_to_send['proxy'] = line
-            if result['status'] == 'SUCCESS':
-                protocol_used = result.get('protocol_used', 'sconosciuto')
-                proxy_to_save = line
-                if protocol_used == 'http' and not line.startswith(('http://', 'https://')):
-                    proxy_to_save = f"http://{line}"
-                elif protocol_used == 'socks5' and not line.startswith(('socks5://', 'socks5h://')):
-                    proxy_to_save = f"socks5://{line}"
-                data_to_send['proxy_to_save'] = proxy_to_save
+                # Se il test è stato fermato, interrompi
+                if result['status'] == 'STOPPED':
+                    break
 
-            print("Risultato per", line, ":", data_to_send)
-            yield f"data: {json.dumps(data_to_send)}\n\n"
+                data_to_send = result.copy()
+                data_to_send['proxy'] = line
+                
+                if result['status'] == 'SUCCESS':
+                    protocol_used = result.get('protocol_used', 'sconosciuto')
+                    proxy_to_save = line
+                    if protocol_used == 'http' and not line.startswith(('http://', 'https://')):
+                        proxy_to_save = f"http://{line}"
+                    elif protocol_used == 'socks5' and not line.startswith(('socks5://', 'socks5h://')):
+                        proxy_to_save = f"socks5://{line}"
+                    data_to_send['proxy_to_save'] = proxy_to_save
+
+                print(f"[{session_id[:8]}] Risultato per {line}: {data_to_send}")
+                yield f"data: {json.dumps(data_to_send)}\n\n"
+        
+        finally:
+            # Pulisci il test attivo
+            with active_tests_lock:
+                if session_id in active_tests:
+                    del active_tests[session_id]
     
     return Response(generate_results(), mimetype='text/event-stream')
 
-if __name__ == '__main__':
-    print("Avvio del server Proxy Tester Web...")
-    print("Apri http://127.0.0.1:7860 nel tuo browser.")
-    app.run(host='0.0.0.0', port=7860, debug=False)
+@app.route('/stop', methods=['POST'])
+def stop_test():
+    """Endpoint per fermare un test in corso"""
+    data = request.get_json()
+    session_id = data.get('session_id') if data else None
+    
+    if not session_id:
+        session_id = request.headers.get('X-Session-ID') or session.get('session_id')
+    
+    if session_id:
+        with active_tests_lock:
+            if session_id in active_tests:
+                active_tests[session_id]['running'] = False
+                print(f"[{session_id[:8]}] Test fermato dall'utente")
+    
+    return {'status': 'stopped'}
 
+@app.route('/status')
+def get_status():
+    """Endpoint per ottenere lo stato dei test attivi"""
+    with active_tests_lock:
+        active_count = len(active_tests)
+        tests_info = []
+        for sid, info in active_tests.items():
+            tests_info.append({
+                'session_id': sid[:8],
+                'running': info['running'],
+                'start_time': info['start_time'].strftime('%H:%M:%S'),
+                'total_proxies': info['total_proxies']
+            })
+    
+    return {
+        'active_tests': active_count,
+        'tests': tests_info
+    }
+
+if __name__ == '__main__':
+    print("Avvio del server Proxy Tester Web Multi-Utente...")
+    print("Apri http://127.0.0.1:7860 nel tuo browser.")
+    print("Endpoint status: http://127.0.0.1:7860/status")
+    app.run(host='0.0.0.0', port=7860, debug=False, threaded=True)
