@@ -8,6 +8,8 @@ from flask import Flask, request, Response, render_template_string, session, jso
 from datetime import datetime
 from functools import wraps
 from dotenv import load_dotenv
+import time
+
 
 # Carica variabili d'ambiente
 load_dotenv()
@@ -269,7 +271,12 @@ HTML_TEMPLATE = """
                                         workingCount++;
                                         const list = document.getElementById('working-list');
                                         const item = document.createElement('li');
-                                        item.innerHTML = '<span class="success">' + data.proxy_to_save + '</span> <span class="protocol">' + data.protocol_used + '</span>';
+                                        // Mostra anche la velocità se presente
+                                        let speedInfo = '';
+                                        if (typeof data.speedtest_mbps !== 'undefined') {
+                                            speedInfo = ` <span style="color:#007bff;font-size:0.9em;">${data.speedtest_mbps} Mbps</span>`;
+                                        }
+                                        item.innerHTML = '<span class="success">' + data.proxy_to_save + '</span> <span class="protocol">' + data.protocol_used + '</span>' + speedInfo;
                                         list.appendChild(item);
                                         document.getElementById('working-count').innerText = workingCount;
                                         document.getElementById('download-btn').disabled = false;
@@ -537,7 +544,7 @@ HTML_TEMPLATE = """
 URL_TO_TEST = 'https://new.newkso.ru/wind/'
 
 def test_single_proxy(proxy_line, proxy_type, address_for_curl, session_id):
-    """Test thread-safe per singolo proxy"""
+    """Test thread-safe per singolo proxy con speedtest"""
     try:
         # Controlla se il test è stato fermato
         with active_tests_lock:
@@ -602,8 +609,38 @@ def test_single_proxy(proxy_line, proxy_type, address_for_curl, session_id):
         if result2.stdout.strip() == '{"error":"Not found"}':
             return {'status': 'FAIL', 'details': 'Risposta vavoo.to: Not found', 'is_protocol_error': False}
         
-        return {'status': 'SUCCESS', 'details': 'Connessione riuscita', 'is_protocol_error': False, 'protocol_used': proxy_type}
-    
+        # --- SPEEDTEST 5 secondi ---
+        SPEEDTEST_URL = 'https://ash-speed.hetzner.com/10GB.bin'  # File pubblico per test velocità
+        speedtest_cmd = [
+            'curl', '-k', '--max-time', '5', '--silent', '--show-error', '--connect-timeout', '5',
+            '--output', '-', '--limit-rate', '100m', SPEEDTEST_URL
+        ]
+        if proxy_type == 'socks5':
+            speedtest_cmd.extend(['--socks5-hostname', address_for_curl])
+        elif proxy_type == 'http':
+            speedtest_cmd.extend(['--proxy', address_for_curl])
+
+        start_time = time.time()
+        speedtest_proc = subprocess.run(speedtest_cmd, capture_output=True, timeout=7)
+        elapsed = time.time() - start_time
+        bytes_downloaded = len(speedtest_proc.stdout)
+        speed_mbps = round((bytes_downloaded * 8) / (elapsed * 1000 * 1000), 2) if elapsed > 0 else 0.0
+
+        # Se errore nello speedtest, segnala ma considera comunque funzionante
+        speedtest_error = None
+        if speedtest_proc.returncode != 0:
+            speedtest_error = speedtest_proc.stderr.decode(errors='ignore') if isinstance(speedtest_proc.stderr, bytes) else speedtest_proc.stderr
+
+        result_dict = {
+            'status': 'SUCCESS',
+            'details': 'Connessione riuscita',
+            'is_protocol_error': False,
+            'protocol_used': proxy_type,
+            'speedtest_mbps': speed_mbps,
+            'speedtest_error': speedtest_error
+        }
+        return result_dict
+
     except subprocess.TimeoutExpired:
         return {'status': 'FAIL', 'details': 'Timeout script (15s)', 'is_protocol_error': False}
     except Exception as e:
