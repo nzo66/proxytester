@@ -45,84 +45,277 @@ def require_auth(f):
 # --- HTML Template ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="it">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Proxy Tester Web - Parallelo</title>
+    <title>Proxy Tester</title>
+    <meta charset=\"utf-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no\">
+    <link href=\"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\" rel=\"stylesheet\">
+    <link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap\" rel=\"stylesheet\">
     <style>
-        body { font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; color: #333; }
-        .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #2c5aa0; text-align: center; margin-bottom: 20px; }
-        textarea { width: 100%; height: 200px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-family: 'Courier New', monospace; }
-        .btn { display: inline-block; padding: 12px 25px; background: #2c5aa0; color: white; text-decoration: none; border-radius: 5px; margin-top: 15px; cursor: pointer; border: none; font-size: 16px; width: 100%; }
-        .btn:hover { background: #1e3d6f; }
-        .btn:disabled { background: #ccc; cursor: not-allowed; }
-        .results-container { display: flex; gap: 20px; margin-top: 30px; }
-        .result-box { flex: 1; background: #f8f9fa; padding: 20px; border-radius: 5px; border-left: 4px solid; }
-        .result-box h2 { margin-top: 0; font-size: 18px; border-bottom: 1px solid #ddd; padding-bottom: 10px; }
-        #working-proxies { border-left-color: #28a745; }
-        #failed-proxies { border-left-color: #dc3545; }
-        .result-box ul { list-style-type: none; padding: 0; margin: 0; max-height: 400px; overflow-y: auto; }
-        .result-box li { padding: 8px; border-bottom: 1px solid #eee; font-family: 'Courier New', monospace; font-size: 14px; word-break: break-all; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+        .navbar {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            padding: 1.5rem 3rem;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+        .navbar h1 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 2.5rem auto;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            padding: 3.5rem 3rem;
+            border-radius: 32px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.13);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .form-group {
+            margin-bottom: 2.2rem;
+            position: relative;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 0.7rem;
+            font-weight: 700;
+            color: #2d3748;
+            font-size: 1.15rem;
+        }
+        .form-group textarea, .form-group input[type=number] {
+            width: 100%;
+            padding: 1.3rem 1.2rem 1.3rem 3.2rem;
+            border: 2.5px solid #e2e8f0;
+            border-radius: 16px;
+            font-size: 1.15rem;
+            transition: all 0.3s ease;
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(10px);
+            resize: vertical;
+        }
+        .form-group textarea:focus, .form-group input[type=number]:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.13);
+            transform: translateY(-2px) scale(1.01);
+        }
+        .form-group i {
+            position: absolute;
+            left: 1.1rem;
+            top: 3.1rem;
+            color: #a0aec0;
+            transition: color 0.3s ease;
+            font-size: 1.3rem;
+        }
+        .form-group textarea:focus + i, .form-group input:focus + i {
+            color: #667eea;
+        }
+        .form-group small {
+            color: #718096;
+            font-size: 1rem;
+            margin-top: 0.5rem;
+            display: block;
+        }
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1.2rem 2.5rem;
+            border: none;
+            border-radius: 16px;
+            cursor: pointer;
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin-right: 1.2rem;
+            margin-top: 0.5rem;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.7rem;
+            box-shadow: 0 4px 18px rgba(102, 126, 234, 0.25);
+        }
+        .btn:hover {
+            transform: translateY(-4px) scale(1.03);
+            box-shadow: 0 8px 32px rgba(102, 126, 234, 0.35);
+        }
+        .btn:disabled {
+            background: #ccc;
+            color: #fff;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 32px;
+            background: #e2e8f0;
+            border-radius: 16px;
+            overflow: hidden;
+            margin: 2.2rem 0 1.5rem 0;
+            box-shadow: 0 1px 8px rgba(102, 126, 234, 0.13);
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.5s cubic-bezier(.4,2,.6,1);
+        }
+        .results-container {
+            display: flex;
+            gap: 2.5rem;
+            margin-top: 2.5rem;
+            flex-wrap: nowrap;
+            width: 100%;
+        }
+        .result-box {
+            flex: 1 1 0;
+            background: rgba(255,255,255,0.92);
+            padding: 2.2rem 1.5rem;
+            border-radius: 20px;
+            border-left: 7px solid #667eea;
+            box-shadow: 0 2px 12px rgba(102,126,234,0.10);
+            min-width: 340px;
+            transition: background 0.3s;
+            max-height: 600px;
+            display: flex;
+            flex-direction: column;
+        }
+        #working-proxies { border-left-color: #38a169; }
+        #failed-proxies { border-left-color: #e53e3e; }
+        .result-box h2 {
+            margin-top: 0;
+            font-size: 1.3rem;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 14px;
+            color: #667eea;
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+        }
+        .result-box ul {
+            list-style-type: none;
+            padding: 0;
+            margin: 0;
+            max-height: 480px;
+            overflow-y: auto;
+            font-size: 1.08rem;
+        }
+        .result-box li {
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+            font-family: 'Fira Mono', monospace;
+            font-size: 1.08rem;
+            word-break: break-all;
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+        }
         .result-box li:last-child { border-bottom: none; }
-        .status-bar { margin-top: 20px; text-align: center; font-weight: bold; }
-        .success { color: #28a745; }
-        .failure { color: #dc3545; }
-        .protocol { font-size: 0.8em; color: #666; background-color: #e9ecef; padding: 2px 5px; border-radius: 3px; margin-left: 5px; }
-        .session-info { background: #e3f2fd; padding: 10px; border-radius: 5px; margin-bottom: 20px; font-size: 14px; }
-        .resume-notice { background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 10px; border-radius: 5px; margin-bottom: 20px; }
-        .parallel-info { background: #e8f5e8; border: 1px solid #4caf50; color: #2e7d32; padding: 10px; border-radius: 5px; margin-bottom: 20px; }
-        .config-section { background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
-        .config-section label { display: block; margin-bottom: 5px; font-weight: bold; }
-        .config-section input[type="number"] { width: 80px; padding: 5px; border: 1px solid #ccc; border-radius: 3px; }
-        .progress-bar { width: 100%; height: 20px; background-color: #e0e0e0; border-radius: 10px; overflow: hidden; margin: 10px 0; }
-        .progress-fill { height: 100%; background-color: #4caf50; transition: width 0.3s ease; }
+        .success { color: #38a169; }
+        .failure { color: #e53e3e; }
+        .protocol {
+            font-size: 0.95em;
+            color: #666;
+            background-color: #e9ecef;
+            padding: 3px 10px;
+            border-radius: 4px;
+            margin-left: 10px;
+        }
+        .alert {
+            padding: 1.2rem 2rem;
+            margin: 2rem 0 1.5rem 0;
+            border-radius: 16px;
+            display: none;
+            font-weight: 600;
+            font-size: 1.15rem;
+            animation: slideIn 0.3s ease;
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .alert-success {
+            background: rgba(56, 161, 105, 0.1);
+            border: 1px solid rgba(56, 161, 105, 0.2);
+            color: #38a169;
+        }
+        .alert-error {
+            background: rgba(229, 62, 62, 0.1);
+            border: 1px solid rgba(229, 62, 62, 0.2);
+            color: #e53e3e;
+        }
+        @media (max-width: 1200px) {
+            .container { max-width: 98vw; padding: 2rem 0.5rem; }
+            .results-container { gap: 1.2rem; }
+            .result-box { min-width: 220px; padding: 1.2rem 0.5rem; }
+        }
+        @media (max-width: 900px) {
+            .container { padding: 1rem 0.2rem; }
+            .results-container { flex-direction: column; gap: 1.2rem; }
+            .result-box { max-width: 100vw; }
+        }
+        @media (max-width: 600px) {
+            .container { margin: 0.5rem; padding: 0.5rem; }
+            .form-group textarea, .form-group input[type=number] { font-size: 16px; padding: 0.875rem 0.875rem 0.875rem 2.5rem; }
+            .form-group i { top: 2.6rem; }
+            .btn { font-size: 1rem; padding: 0.8rem 1.2rem; }
+        }
     </style>
 </head>
 <body>
+    <nav class="navbar">
+        <h1><i class="fas fa-network-wired"></i> Proxy Tester</h1>
+    </nav>
     <div class="container">
-        <h1>🚀 Web Proxy Tester - Parallelo</h1>
-        <div class="session-info">
-            <strong>ID Sessione:</strong> <span id="session-id">{{ session_id }}</span> | 
-            <strong>Avviato:</strong> <span id="session-time">{{ session_time }}</span>
+        <div class="alert alert-success" id="successAlert"><i class="fas fa-check-circle"></i> Proxy funzionante!</div>
+        <div class="alert alert-error" id="errorAlert"><i class="fas fa-exclamation-triangle"></i> Proxy non funzionante.</div>
+        <div class="form-group">
+            <label for="proxy-list">Lista Proxy</label>
+            <textarea id="proxy-list" placeholder="1.2.3.4:8080\nsocks5://user:pass@5.6.7.8:1080\n..." rows="5"></textarea>
+            <i class="fas fa-list"></i>
+            <small>Incolla qui la tua lista di proxy, uno per riga</small>
         </div>
-        <div class="parallel-info">
-            ⚡ <strong>Modalità Parallela Attiva:</strong> I proxy vengono testati contemporaneamente per maggiore velocità!
-        </div>
-        <div id="resume-notice" class="resume-notice" style="display:none;">
-            ⚠️ Test ripreso dopo ricaricamento pagina. I risultati precedenti potrebbero non essere visibili.
-        </div>
-        
-        <div class="config-section">
-            <label for="max-workers">Numero massimo di test paralleli:</label>
+        <div class="form-group">
+            <label for="max-workers">Numero massimo di test paralleli</label>
             <input type="number" id="max-workers" value="20" min="1" max="50">
-            <small style="color: #666; margin-left: 10px;">Raccomandato: 10-30 (più alto = più veloce ma usa più risorse)</small>
+            <i class="fas fa-bolt"></i>
+            <small>Raccomandato: 10-30 (più alto = più veloce ma usa più risorse)</small>
         </div>
-        
-        <p>Incolla la tua lista di proxy (uno per riga) nel box sottostante e avvia il test parallelo.</p>
-        <textarea id="proxy-list" placeholder="1.2.3.4:8080\nsocks5://user:pass@5.6.7.8:1080\n..."></textarea>
-        <button id="start-test-btn" class="btn" onclick="startTest()">🚀 Avvia Test Parallelo</button>
-        <button id="download-btn" class="btn" style="background:#28a745;margin-top:10px;" onclick="downloadWorkingProxies()" disabled>📥 Scarica Proxy Funzionanti</button>
-        <button id="stop-test-btn" class="btn" style="background:#dc3545;margin-top:10px;" onclick="stopTest()" disabled>⏹️ Stop Test</button>
-        
-        <div id="status-bar" class="status-bar"></div>
+        <button id="start-test-btn" class="btn" onclick="startTest()"><i class="fas fa-play"></i> Avvia Test Parallelo</button>
+        <button id="download-btn" class="btn" style="background:linear-gradient(135deg,#38a169 0%,#48bb78 100%);margin-top:10px;" onclick="downloadWorkingProxies()" disabled><i class="fas fa-download"></i> Scarica Proxy Funzionanti</button>
+        <button id="stop-test-btn" class="btn btn-secondary" style="background:linear-gradient(135deg,#e53e3e 0%,#c53030 100%);margin-top:10px;" onclick="stopTest()" disabled><i class="fas fa-stop"></i> Stop Test</button>
         <div class="progress-bar">
-            <div id="progress-fill" class="progress-fill" style="width: 0%;"></div>
+            <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
         </div>
-
+        <div id="status-bar" class="status-bar"></div>
         <div class="results-container">
             <div id="working-proxies" class="result-box">
-                <h2>✅ Funzionanti (<span id="working-count">0</span>)</h2>
+                <h2><i class="fas fa-check-circle"></i> Funzionanti (<span id="working-count">0</span>)</h2>
                 <ul id="working-list"></ul>
             </div>
             <div id="failed-proxies" class="result-box">
-                <h2>❌ Non Funzionanti (<span id="failed-count">0</span>)</h2>
+                <h2><i class="fas fa-times-circle"></i> Non Funzionanti (<span id="failed-count">0</span>)</h2>
                 <ul id="failed-list"></ul>
             </div>
         </div>
     </div>
-
     <script>
         let abortController = null;
         const sessionId = '{{ session_id }}';
@@ -276,7 +469,7 @@ HTML_TEMPLATE = """
                                         if (typeof data.speedtest_mbps !== 'undefined') {
                                             speedInfo = ` <span style="color:#007bff;font-size:0.9em;">${data.speedtest_mbps} Mbps</span>`;
                                         }
-                                        item.innerHTML = '<span class="success">' + data.proxy_to_save + '</span> <span class="protocol">' + data.protocol_used + '</span>' + speedInfo;
+                                        item.innerHTML = '<span class="success"><i class="fas fa-check-circle"></i> ' + data.proxy_to_save + '</span> <span class="protocol">' + data.protocol_used + '</span>' + speedInfo;
                                         list.appendChild(item);
                                         document.getElementById('working-count').innerText = workingCount;
                                         document.getElementById('download-btn').disabled = false;
@@ -284,7 +477,7 @@ HTML_TEMPLATE = """
                                         failedCount++;
                                         const list = document.getElementById('failed-list');
                                         const item = document.createElement('li');
-                                        item.innerHTML = '<span class="failure">' + data.proxy + '</span> - ' + data.details;
+                                        item.innerHTML = '<span class="failure"><i class="fas fa-times-circle"></i> ' + data.proxy + '</span> - ' + data.details;
                                         list.appendChild(item);
                                         document.getElementById('failed-count').innerText = failedCount;
                                     }
@@ -395,7 +588,7 @@ HTML_TEMPLATE = """
                                 if (data.status === 'SUCCESS') {
                                     const list = document.getElementById('working-list');
                                     const item = document.createElement('li');
-                                    item.innerHTML = '<span class="success">' + data.proxy_to_save + '</span> <span class="protocol">' + data.protocol_used + '</span>';
+                                    item.innerHTML = '<span class="success"><i class="fas fa-check-circle"></i> ' + data.proxy_to_save + '</span> <span class="protocol">' + data.protocol_used + '</span>';
                                     list.appendChild(item);
                                     const currentCount = parseInt(document.getElementById('working-count').innerText);
                                     document.getElementById('working-count').innerText = currentCount + 1;
@@ -403,7 +596,7 @@ HTML_TEMPLATE = """
                                 } else if (data.status === 'FAIL') {
                                     const list = document.getElementById('failed-list');
                                     const item = document.createElement('li');
-                                    item.innerHTML = '<span class="failure">' + data.proxy + '</span> - ' + data.details;
+                                    item.innerHTML = '<span class="failure"><i class="fas fa-times-circle"></i> ' + data.proxy + '</span> - ' + data.details;
                                     list.appendChild(item);
                                     const currentCount = parseInt(document.getElementById('failed-count').innerText);
                                     document.getElementById('failed-count').innerText = currentCount + 1;
@@ -535,6 +728,52 @@ HTML_TEMPLATE = """
                 checkSessionStatus();
             }, 500);
         });
+
+        // Dark mode toggle
+        const themeToggle = document.getElementById('theme-toggle');
+        const themeIcon = document.getElementById('theme-icon');
+        function setTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+            localStorage.setItem('theme', theme);
+            themeIcon.innerHTML = theme === 'dark' ? `<path d='M21 12.79A9 9 0 1111.21 3a7 7 0 109.79 9.79z'/>` : `<circle cx='12' cy='12' r='5'/><path d='M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42'/>`;
+        }
+        themeToggle.onclick = function() {
+            const current = document.documentElement.getAttribute('data-theme') || 'light';
+            setTheme(current === 'dark' ? 'light' : 'dark');
+        };
+        (function() {
+            const saved = localStorage.getItem('theme');
+            if (saved) setTheme(saved);
+        })();
+        // Toast/snackbar
+        function showToast(msg, timeout=3000) {
+            const toast = document.getElementById('toast');
+            toast.textContent = msg;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), timeout);
+        }
+        // Loader animato
+        function showLoader(show) {
+            const loader = document.getElementById('loader');
+            if (loader) loader.classList.toggle('active', !!show);
+        }
+        // Hook start/stop test per loader
+        const origStartTest = window.startTest;
+        window.startTest = function() {
+            showLoader(true);
+            origStartTest.apply(this, arguments);
+        };
+        const origStopTest = window.stopTest;
+        window.stopTest = function() {
+            showLoader(false);
+            origStopTest.apply(this, arguments);
+        };
+        // Nascondi loader a fine test
+        const origUpdateProgress = window.updateProgress;
+        window.updateProgress = function(completed, total) {
+            origUpdateProgress(completed, total);
+            if (completed === total) showLoader(false);
+        };
     </script>
 </body>
 </html>
@@ -1017,131 +1256,8 @@ def get_status():
         }
     }
 
-@app.route('/admin')
-@require_auth
 def admin_panel():
-    """Pannello admin protetto"""
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Admin Panel - Proxy Tester Parallelo</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
-            .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            h1 { color: #2c5aa0; }
-            .status-box { background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 10px 0; }
-            .session-box { background: #f8f9fa; padding: 10px; border-radius: 5px; margin: 5px 0; border-left: 4px solid #28a745; }
-            .session-box.stopped { border-left-color: #dc3545; }
-            button { padding: 10px 20px; background: #2c5aa0; color: white; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }
-            button:hover { background: #1e3d6f; }
-            .refresh-btn { background: #28a745; }
-            .json-btn { background: #17a2b8; }
-            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-            th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
-            th { background-color: #f2f2f2; }
-            .running { color: #28a745; font-weight: bold; }
-            .stopped { color: #dc3545; font-weight: bold; }
-            .progress { font-size: 0.9em; color: #666; }
-            .heartbeat { font-size: 0.8em; color: #888; }
-            .workers { font-size: 0.8em; color: #007bff; font-weight: bold; }
-            .parallel-badge { background: #4caf50; color: white; padding: 2px 6px; border-radius: 3px; font-size: 0.7em; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🚀 Admin Panel - Proxy Tester Parallelo</h1>
-            <div class="status-box">
-                <h3>Stato Server</h3>
-                <p><strong>Versione:</strong> 2.2 Multi-User con Testing Parallelo <span class="parallel-badge">PARALLELO</span></p>
-                <p><strong>Sessioni Attive:</strong> <span id="active-count">-</span></p>
-                <p><strong>Ultimo Aggiornamento:</strong> <span id="last-update">-</span></p>
-            </div>
-            
-            <button class="refresh-btn" onclick="loadStatus()">🔄 Aggiorna Stato</button>
-            <button class="json-btn" onclick="window.open('/status', '_blank')">📊 Vedi JSON Status</button>
-            <button onclick="window.open('/', '_blank')">🏠 Vai all'App</button>
-            
-            <div id="sessions-container">
-                <h3>Sessioni Attive</h3>
-                <div id="sessions-list"></div>
-                <table id="sessions-table" style="display:none;">
-                    <thead>
-                        <tr>
-                            <th>ID Sessione</th>
-                            <th>Stato</th>
-                            <th>Progresso</th>
-                            <th>Workers</th>
-                            <th>Avviato</th>
-                            <th>Data</th>
-                            <th>Ultimo Heartbeat</th>
-                        </tr>
-                    </thead>
-                    <tbody id="sessions-tbody">
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        
-        <script>
-            function loadStatus() {
-                fetch('/status')
-                .then(function(response) { return response.json(); })
-                .then(function(data) {
-                    document.getElementById('active-count').textContent = data.active_tests;
-                    document.getElementById('last-update').textContent = new Date().toLocaleString();
-                    
-                    const sessionsList = document.getElementById('sessions-list');
-                    const sessionsTable = document.getElementById('sessions-table');
-                    const sessionsTableBody = document.getElementById('sessions-tbody');
-                    
-                    if (data.tests.length > 0) {
-                        // Mostra tabella
-                        sessionsList.style.display = 'none';
-                        sessionsTable.style.display = 'table';
-                        
-                        // Pulisci tabella
-                        sessionsTableBody.innerHTML = '';
-                        
-                        // Popola tabella
-                        data.tests.forEach(function(test) {
-                            const row = document.createElement('tr');
-                            const statusClass = test.running ? 'running' : 'stopped';
-                            const statusText = test.running ? '🟢 Attivo' : '🔴 Fermato';
-                            const progress = test.completed_count + '/' + test.total_proxies;
-                            const workers = test.max_workers || 'N/A';
-                            
-                            row.innerHTML = '<td><code>' + test.session_id + '</code></td>' +
-                                          '<td><span class="' + statusClass + '">' + statusText + '</span></td>' +
-                                          '<td><span class="progress">' + progress + '</span></td>' +
-                                          '<td><span class="workers">' + workers + ' thread</span></td>' +
-                                          '<td>' + test.start_time + '</td>' +
-                                          '<td>' + test.start_date + '</td>' +
-                                          '<td><span class="heartbeat">' + test.last_heartbeat + '</span></td>';
-                            sessionsTableBody.appendChild(row);
-                        });
-                    } else {
-                        // Mostra messaggio
-                        sessionsTable.style.display = 'none';
-                        sessionsList.style.display = 'block';
-                        sessionsList.innerHTML = '<p>🎉 Nessuna sessione attiva</p>';
-                    }
-                })
-                .catch(function(error) {
-                    console.error('Errore:', error);
-                    alert('Errore nel caricamento dello stato. Verifica le credenziali.');
-                });
-            }
-            
-            // Carica stato iniziale
-            loadStatus();
-            
-            // Auto-refresh ogni 30 secondi
-            setInterval(loadStatus, 30000);
-        </script>
-    </body>
-    </html>
-    """)
+    pass
 
 if __name__ == '__main__':
     print("🚀 Avvio del server Proxy Tester Web Multi-Utente con Testing Parallelo...")
