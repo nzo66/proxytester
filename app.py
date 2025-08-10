@@ -823,7 +823,7 @@ def test_single_proxy(proxy_line, proxy_type, address_for_curl, session_id):
                 return {'status': 'FAIL', 'details': 'Risposta HTTP 404 o errore nel contenuto', 'is_protocol_error': False}
         
         # Secondo test: vavoo.to
-        VAVOO_URL = 'https://vavoo.to/play/1534161807/index.m3u8'
+        VAVOO_URL = 'https://vavoo.to/play/1101559666/index.m3u8'
         cmd2 = [
             'curl', '-k', '--max-time', '10', '--silent', '--show-error', '--connect-timeout', '7',
             '-H', 'user-agent: VAVOO/2.6',
