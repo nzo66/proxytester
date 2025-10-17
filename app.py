@@ -780,7 +780,7 @@ HTML_TEMPLATE = """
 """
 
 # --- Backend Logic ---
-URL_TO_TEST = 'https://new.newkso.ru/wind/'
+URL_TO_TEST = 'https://windnew.newkso.ru/wind/premium881/mono.m3u8'
 
 def test_single_proxy(proxy_line, proxy_type, address_for_curl, session_id):
     """Test thread-safe per singolo proxy con speedtest"""
@@ -791,7 +791,14 @@ def test_single_proxy(proxy_line, proxy_type, address_for_curl, session_id):
                 return {'status': 'STOPPED', 'details': 'Test fermato dall\'utente', 'is_protocol_error': False}
 
         # Primo test: sito principale
-        cmd = ['curl', '-k', '--max-time', '10', '--silent', '--show-error', '--connect-timeout', '7', URL_TO_TEST]
+        cmd = [
+            'curl', '-k', '--max-time', '10', '--silent', '--show-error', '--connect-timeout', '7',
+            '-H', 'user-agent: VAVOO/2.6',
+            '-H', 'referer: https://kondoplay.cfd/',
+            '-H', 'origin: https://kondoplay.cfd',
+            URL_TO_TEST
+        ]
+
         if proxy_type == 'socks5':
             cmd.extend(['--socks5-hostname', address_for_curl])
         elif proxy_type == 'http':
